@@ -1,0 +1,20 @@
+# raw + processed data (downloaded via `make data`, never committed)
+data/
+
+# python virtualenv + caches
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# experiment tracking artifacts
+mlruns/
+mlartifacts/
+
+# os cruft
+.DS_Store
+
+# NOTE: reports/ (Tableau .twbx, Power BI .pbix, screenshots) is intentionally
+# tracked — those are portfolio deliverables.
