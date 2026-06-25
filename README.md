@@ -1,63 +1,160 @@
 # Demand Forecasting Platform with Champion–Challenger A/B Testing
 
-A retail demand-forecasting **decision system**: it serves SKU-level forecasts, then runs a
-controlled champion–challenger experiment to prove a deep-learning model beats the incumbent
-baseline *before* rollout. Forecasts are surfaced in **Tableau**; the experiment readout in **Power BI**.
+A retail demand-forecasting **decision system** on the Walmart M5 dataset: it serves SKU-level
+forecasts, then runs a controlled champion–challenger A/B experiment to prove a deep-learning
+model beats the incumbent baseline *before* rollout — with results surfaced in **Tableau** and
+**Power BI**.
 
 > The point isn't "I trained an LSTM." The point is the full chain a real DS team uses to gate a launch:
 > **offline metrics → experimental validation → business go/no-go decision.**
 
 ---
 
-## Status
+## TL;DR results
 
-| Phase | What | State |
-|------|------|-------|
-| 0 | Repo + env + Kaggle data pipeline | ✅ done |
-| 1 | Data loading + cleaning + EDA | ⬜ next |
-| 2 | Features + baselines (the *champion*) | ⬜ |
-| 3 | Deep-learning model (the *challenger*) | ⬜ |
-| 4 | Champion–challenger A/B experiment | ⬜ |
-| 5 | Dashboards (Tableau + Power BI) | ⬜ |
-| 6 | Tests + polish + v1 | ⬜ |
+We ran 5 forecasting models on 900 store–SKU series (3 stores × 3 categories × 100 items), 3
+rolling-origin folds (28-day horizon each), then ran two A/B tests on simulated business cost.
 
-## Dataset
+**Accuracy leaderboard** (volume-weighted WMAPE, lower is better):
 
-[M5 Forecasting – Accuracy](https://www.kaggle.com/competitions/m5-forecasting-accuracy) (Walmart):
-~30K store–SKU daily series, 5+ years, with price + calendar/event features. We use three files:
-`sales_train_evaluation.csv`, `calendar.csv`, `sell_prices.csv`.
+| Model | WMAPE-vw | Notes |
+|---|---|---|
+| **lstm_seq2seq (MSE)** | **0.792** | best — wins on all 3 folds |
+| ets | 0.828 | best classical baseline; one fit per series |
+| lightgbm | 0.838 | global ML model |
+| seasonal_naive | 0.994 | the floor every model must beat |
 
-## Time-series ground rules (the spine of this project)
+**A/B experiment outcomes** (champion = ETS, treatment = LSTM, simulated newsvendor with 5:1 stockout:holding cost):
 
-1. **Never shuffle time** — split by date only (train past → test future), never random rows.
-2. **No future leakage** — a feature for day *t* uses only info available at/before *t* (lags are `.shift`ed).
-3. **Rolling-origin backtesting** — slide the cutoff forward over several folds, don't trust one split.
-4. **Fit scalers on train only** — apply train stats to val/test; never fit on the whole series.
-5. **Retail-correct metrics** — primary **WMAPE**, secondary **MASE** (vs seasonal-naive), not just RMSE.
+| Variant | Cost change | Significance | Service change | Decision | Why |
+|---|---|---|---|---|---|
+| **v1: LSTM-MSE** | −2.5% | p = 0.11 | +0.9 pp | **HOLD** | direction right, under-powered |
+| **v2: LSTM-q80** | **−12.9%** | **p = 0.001** | +8.9 pp | **HOLD** | huge cost win, but service degrades too much |
+
+**The verdict is HOLD on both — and that's the most important finding.** The cost-aware quantile model produces a statistically-significant 12.9% cost reduction, but at the price of +8.9 percentage points of stockouts (4.4% → 13.3%). That trade-off is too steep under our guardrail (max +2pp). The natural next iteration is a less-extreme quantile (τ=0.65) with normal safety stock — documented as future work.
+
+**Why this matters for the resume:** building a model that *wins on accuracy* is easy. Building the rest of the system — a stratified A/B with a power analysis, a cost-simulator, a guardrail that catches a real failure mode, and an honest go/no-go recommendation — is what separates a hired DS from someone who only does Kaggle.
+
+---
+
+## Project arc — what we built, in plain language
+
+| Phase | What | Status |
+|---|---|---|
+| 0 | Repo + env + Kaggle data pipeline (`make data`) | ✅ |
+| 1 | Data loading + cleaning + EDA (8 plots) | ✅ |
+| 2 | Baselines (seasonal-naive, ETS, ARIMA, LightGBM) — champion = ETS | ✅ |
+| 3 | Deep-learning challenger — diagnosed mean-collapse, fixed with seq2seq, then added pinball loss | ✅ |
+| 4 | Stratified A/B with newsvendor simulation, power analysis, guardrails, go/no-go | ✅ |
+| 5 | Dashboard data + mock PNGs + Tableau / Power BI build recipes | ✅ |
+| 6 | Tests + README + git tag v1 | ✅ |
+
+### Engineering discipline applied throughout
+
+- **Time-series rules enforced** (no shuffled splits, lag features `.shift()`-ed, scalers fit on train fold only, rolling-origin backtesting, WMAPE/MASE not just RMSE).
+- **MLflow** tracking on every model run — view with `mlflow ui --backend-store-uri sqlite:///mlflow.db`.
+- **Pytest** with a real **no-future-leakage guard** on feature engineering (the most important test in the repo).
+- **Honest iteration** — kept failed attempts (recursive LSTM mean-collapse, q80-with-safety-stock over-correction) visible in git history because the iteration *is* the story.
+
+---
+
+## Screenshots
+
+### Phase 1 — EDA (the headline finding: 55% of days are zero-sales)
+![sales distribution](reports/phase1_eda/02_sales_distribution.png)
+![STL decomposition](reports/phase1_eda/05_stl_fast_sku.png)
+
+### Phase 3 — LSTM seq2seq wins on accuracy
+![accuracy leaderboard](reports/phase3_lstm_seq2seq/01_combined_leaderboard.png)
+
+### Phase 4 — A/B test the cost-aware q80 LSTM
+![A/B v2 decision](reports/phase4_experiment_v2/03_decision_summary.png)
+
+### Phase 5 — Dashboards (mocks; recipes provided for the real interactive builds)
+
+**Forecasting dashboard (Tableau mock):**
+![Tableau mock](reports/phase5_dashboards/mock_tableau_forecasts.png)
+
+**A/B readout (Power BI mock):**
+![Power BI mock](reports/phase5_dashboards/mock_powerbi_ab.png)
+
+---
 
 ## How to run
 
 ```bash
-# one-time: create env + install (we install lazily per phase; this does it all)
+# one-time setup
 python3.12 -m venv .venv
-make install
+make install                      # installs pandas, torch, mlflow, statsforecast, etc.
 
-# download the raw M5 files into data/ (requires Kaggle token at ~/.kaggle/access_token)
-make data
+# data
+make data                         # download M5 from Kaggle (needs ~/.kaggle/access_token)
+.venv/bin/python -m src.data --make-sample   # builds 900-series dev parquet (~10 sec)
 
-# later phases
-make sample      # carve fast dev subset
-make features    # build features
-make train       # baselines + deep model
-make experiment  # A/B test + stats
-make test        # pytest
+# explore
+.venv/bin/python -m scripts.phase1_eda
+
+# train + experiment
+.venv/bin/python -m scripts.phase2_baselines
+.venv/bin/python -m scripts.phase3_lstm_seq2seq
+.venv/bin/python -m scripts.phase3_lstm_quantile
+.venv/bin/python -m scripts.phase4_experiment
+.venv/bin/python -m scripts.phase4_experiment_v2
+
+# dashboards
+.venv/bin/python -m scripts.phase5_dashboards
+
+# tests
+make test                          # 15 tests, including the leakage guard
+
+# experiment tracking UI
+.venv/bin/mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
-## Results
+## Repo layout
 
-_TBD — filled in as phases complete (WMAPE leaderboard, A/B lift + significance, dashboard screenshots)._
+```
+demand-forecasting-ab/
+├── data/                # gitignored (downloaded via make data)
+├── notebooks/           # for exploratory work (kept clean — analysis lives in scripts/)
+├── src/
+│   ├── data.py          # M5 load + clean + dev-sample
+│   ├── features.py      # lag/rolling/calendar/price -- TS-rule-#2 enforced
+│   ├── metrics.py       # WMAPE, RMSE, MASE
+│   ├── backtest.py      # rolling-origin splits (TS-rule-#3)
+│   ├── experiment.py    # A/B stats: power, t-test, Mann-Whitney, prop z, bootstrap CI
+│   └── models/
+│       ├── baseline.py  # seasonal-naive, ETS, AutoARIMA, LightGBM (Tweedie)
+│       └── deep.py      # LSTM (recursive + seq2seq + quantile-loss variant)
+├── scripts/             # one script per phase, all importing src/
+├── tests/               # 15 tests; the leakage guard is the load-bearing one
+├── reports/             # plots, CSVs, mock dashboards, build recipes
+└── README.md
+```
+
+---
+
+## Time-series ground rules (the spine of this project)
+
+1. **Never shuffle time** — split by date only (train past → test future), never random rows.
+2. **No future leakage** — a feature for day *t* uses only info available at/before *t* (lags `.shift()`-ed). Enforced by `tests/test_features.py::test_no_future_leakage_in_any_lag_or_rolling_feature`.
+3. **Rolling-origin backtesting** — slide the cutoff forward over several folds, don't trust one split.
+4. **Fit scalers on train only** — apply train stats to val/test; never fit on the whole series.
+5. **Retail-correct metrics** — primary **WMAPE**, secondary **MASE** (vs seasonal-naive), not just RMSE.
+
+---
 
 ## What I'd do next
 
-Sequential testing / always-valid p-values, multi-armed bandits for adaptive rollout,
-hierarchical forecast reconciliation across the store/category hierarchy.
+- **Quantile sweep:** try τ ∈ {0.60, 0.65, 0.70} on top of normal safety stock to find the sweet spot between v1 (no cost win) and v2 (too much service degradation).
+- **Scale to full M5** (~30K series) — MDE drops to ~3%, both v1 and v2 verdicts likely flip to SHIP/HOLD with confidence rather than HOLD-but-close.
+- **CUPED variance reduction** — use pre-period cost as a covariate; 30-50% MDE reduction at the same sample size, industry-standard at Netflix/Booking/Uber.
+- **Sequential testing** — early-stop the experiment when significance is hit, instead of fixed 84-day windows.
+- **Hierarchical reconciliation** — currently each (store, item) is forecast independently; aligning the store/category hierarchy (MinT or bottom-up) is the next accuracy lift.
+- **Ensemble** — every M5 winner blended LightGBM and DL. A 50/50 blend often beats either alone.
+
+---
+
+## Acknowledgements
+
+Built end-to-end in a single iterative session. Honest iteration (with all dead-ends preserved in git history) made the project, not a polished one-shot. The HOLD outcome on the A/B test is the project's most defensible finding.
