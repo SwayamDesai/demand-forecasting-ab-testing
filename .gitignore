@@ -12,6 +12,8 @@ __pycache__/
 # experiment tracking artifacts
 mlruns/
 mlartifacts/
+mlflow.db
+mlflow.db-journal
 
 # os cruft
 .DS_Store
