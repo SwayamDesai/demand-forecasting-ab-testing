@@ -19,15 +19,15 @@ STEPS = [
     ("Phase 2: baselines (sn/ets/arima/lgbm)", ["scripts.phase2_baselines"]),
     ("Phase 3a: LSTM seq2seq MSE",  ["scripts.phase3_lstm_seq2seq"]),
     ("Phase 3b: LSTM seq2seq q80",  ["scripts.phase3_lstm_quantile"]),
-    ("Phase 4a: A/B v1",            ["scripts.phase4_experiment"]),
-    ("Phase 4b: A/B v2",            ["scripts.phase4_experiment_v2"]),
+    ("Phase 4a: A/B v1 (mse)",      ["scripts.phase4_experiment", "--challenger", "mse"]),
+    ("Phase 4b: A/B v2 (q80)",      ["scripts.phase4_experiment", "--challenger", "q80"]),
 ]
 
 
-def run(label: str, module: str) -> tuple[bool, float]:
+def run(label: str, module_and_args: list[str]) -> tuple[bool, float]:
     t0 = time.time()
     print(f"\n{'='*70}\n>>> {label}\n{'='*70}", flush=True)
-    res = subprocess.run([sys.executable, "-m", module], check=False)
+    res = subprocess.run([sys.executable, "-m", *module_and_args], check=False)
     dt = time.time() - t0
     ok = res.returncode == 0
     print(f">>> {label}: {'OK' if ok else 'FAILED'} ({dt/60:.1f} min)", flush=True)
@@ -38,7 +38,7 @@ def main() -> int:
     total_t0 = time.time()
     summary = []
     for label, args in STEPS:
-        ok, dt = run(label, args[0])
+        ok, dt = run(label, args)
         summary.append({"step": label, "ok": ok, "minutes": round(dt / 60, 1)})
         if not ok:
             print(f"\n!!! pipeline halted at: {label}\n", flush=True)

@@ -52,7 +52,9 @@ rolling-origin folds (28-day horizon each), then ran two A/B tests on simulated 
 ### Engineering discipline applied throughout
 
 - **Time-series rules enforced** (no shuffled splits, lag features `.shift()`-ed, scalers fit on train fold only, rolling-origin backtesting, WMAPE/MASE not just RMSE).
-- **MLflow** tracking on every model run — view with `mlflow ui --backend-store-uri sqlite:///mlflow.db`.
+- **Validation + early stopping** — the LSTM holds out the most-recent 28 days of each train fold as a *time-based* inner-validation set (never random), early-stops on val loss with patience, and restores the best-epoch weights. Prevents overfitting from a fixed epoch count.
+- **MLflow** tracking on every model run (train+val loss curves, best epoch, all metrics) — view with `mlflow ui --backend-store-uri sqlite:///mlflow.db`.
+- **Pinned lockfile + GitHub Actions CI** — `requirements.lock` for byte-identical rebuilds; CI runs the test suite on every push.
 - **Pytest** with a real **no-future-leakage guard** on feature engineering (the most important test in the repo).
 - **Honest iteration** — kept failed attempts (recursive LSTM mean-collapse, q80-with-safety-stock over-correction) visible in git history because the iteration *is* the story.
 
@@ -68,7 +70,7 @@ rolling-origin folds (28-day horizon each), then ran two A/B tests on simulated 
 ![accuracy leaderboard](reports/phase3_lstm_seq2seq/01_combined_leaderboard.png)
 
 ### Phase 4 — A/B test the cost-aware q80 LSTM
-![A/B v2 decision](reports/phase4_experiment_v2/03_decision_summary.png)
+![A/B v2 decision](reports/phase4_experiment_v2/04_decision_summary.png)
 
 ### Phase 5 — Dashboards (mocks; recipes provided for the real interactive builds)
 
@@ -83,29 +85,34 @@ rolling-origin folds (28-day horizon each), then ran two A/B tests on simulated 
 ## How to run
 
 ```bash
-# one-time setup
+# one-time setup -- two options:
 python3.12 -m venv .venv
-make install                      # installs pandas, torch, mlflow, statsforecast, etc.
+make install                          # human-readable ranges (requirements.txt)
+#   OR, for a byte-identical environment:
+.venv/bin/pip install -r requirements.lock   # pinned freeze (Python 3.12.12)
 
 # data
-make data                         # download M5 from Kaggle (needs ~/.kaggle/access_token)
-.venv/bin/python -m src.data --make-sample   # builds 900-series dev parquet (~10 sec)
+make data                             # download M5 from Kaggle (needs ~/.kaggle/access_token)
+.venv/bin/python -m src.data --make-sample   # builds the dev parquet (~15 sec)
 
 # explore
 .venv/bin/python -m scripts.phase1_eda
 
 # train + experiment
 .venv/bin/python -m scripts.phase2_baselines
-.venv/bin/python -m scripts.phase3_lstm_seq2seq
-.venv/bin/python -m scripts.phase3_lstm_quantile
-.venv/bin/python -m scripts.phase4_experiment
-.venv/bin/python -m scripts.phase4_experiment_v2
+.venv/bin/python -m scripts.phase3_lstm_seq2seq            # MSE LSTM  (early-stopped)
+.venv/bin/python -m scripts.phase3_lstm_quantile          # q80 LSTM  (early-stopped)
+.venv/bin/python -m scripts.phase4_experiment --challenger mse   # A/B v1 -> reports/phase4_experiment/
+.venv/bin/python -m scripts.phase4_experiment --challenger q80   # A/B v2 -> reports/phase4_experiment_v2/
+
+# ...or run phases 2-4 end-to-end in one tracked process:
+.venv/bin/python -m scripts.run_remaining_pipeline
 
 # dashboards
 .venv/bin/python -m scripts.phase5_dashboards
 
-# tests
-make test                          # 15 tests, including the leakage guard
+# tests (also run in GitHub Actions CI on every push -- see .github/workflows/ci.yml)
+make test                             # 15 tests, including the no-leakage guard
 
 # experiment tracking UI
 .venv/bin/mlflow ui --backend-store-uri sqlite:///mlflow.db

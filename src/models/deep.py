@@ -191,11 +191,16 @@ class Seq2SeqConfig:
     dropout: float = 0.2
     lr: float = 1e-3
     batch_size: int = 256
-    epochs: int = 8
+    epochs: int = 30          # MAX epochs; early stopping usually halts sooner
     # If set (0,1), use pinball/quantile loss at this tau instead of MSE.
     # tau=0.80 -> punish under-prediction 4x more than over-prediction.
     # Newsvendor-optimal tau* = c_stockout / (c_stockout + c_holding).
     quantile: float | None = None
+    # ---- validation + early stopping (TS-correct: val is the most-recent
+    #      H-day inner fold of the TRAIN window, never a random split) -------
+    val_horizon: int = 28     # hold out the last `val_horizon` days of train for val
+    patience: int = 4         # stop if val loss doesn't improve for this many epochs
+    min_delta: float = 1e-4   # minimum val-loss improvement to count as progress
 
 
 def pinball_loss(pred: torch.Tensor, target: torch.Tensor, tau: float) -> torch.Tensor:
@@ -269,18 +274,21 @@ def train_and_predict(
 
 def _make_seq2seq_windows(
     df: pd.DataFrame, item_to_idx: dict, L: int, H: int, stride: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Build (X_past, X_fut, Y, item_ids) tuples where:
+    Build (X_past, X_fut, Y, item_ids, target_end_date) tuples where:
       X_past : (N, L, F_past)  past features incl. sales
       X_fut  : (N, H, F_fut)   future EXOGENOUS-only features
       Y      : (N, H)          log1p(sales) for the H future days
+      target_end_date : (N,)   the LAST date each window forecasts (for a
+                               time-based train/val split -- TS rule #1)
     """
-    Xp, Xf, Y, ids = [], [], [], []
+    Xp, Xf, Y, ids, tgt_end = [], [], [], [], []
     for sid, g in df.sort_values(["id", "date"]).groupby("id", sort=False):
         past  = g[PAST_FEATURE_COLS].to_numpy(dtype=np.float32)
         fut   = g[FUTURE_FEATURE_COLS].to_numpy(dtype=np.float32)
         target = g["log1p_sales"].to_numpy(dtype=np.float32)
+        dates  = g["date"].to_numpy()
         idx = item_to_idx.get(sid)
         if idx is None or len(past) < L + H:
             continue
@@ -289,8 +297,10 @@ def _make_seq2seq_windows(
             Xf.append(fut[t:t + H])
             Y.append(target[t:t + H])
             ids.append(idx)
+            tgt_end.append(dates[t + H - 1])
     return (np.stack(Xp), np.stack(Xf), np.stack(Y),
-            np.asarray(ids, dtype=np.int64))
+            np.asarray(ids, dtype=np.int64),
+            np.asarray(tgt_end, dtype="datetime64[ns]"))
 
 
 def train_and_predict_seq2seq(
@@ -312,14 +322,35 @@ def train_and_predict_seq2seq(
     train, price_stats = _add_lstm_features(train_raw)
     item_to_idx = {sid: i for i, sid in enumerate(sorted(train["id"].unique()))}
 
-    Xp, Xf, Y, ids = _make_seq2seq_windows(train, item_to_idx, cfg.L, cfg.H, cfg.stride)
-    print(f"    training windows: {len(Xp):,}  (L={cfg.L}, H={cfg.H}, stride={cfg.stride})")
+    Xp, Xf, Y, ids, tgt_end = _make_seq2seq_windows(
+        train, item_to_idx, cfg.L, cfg.H, cfg.stride)
 
-    ds = TensorDataset(torch.from_numpy(Xp), torch.from_numpy(Xf),
-                       torch.from_numpy(ids), torch.from_numpy(Y))
-    loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True, drop_last=False)
+    # --- 1b) TIME-BASED train/val split (inner fold) ----------------------
+    # Validation = windows whose forecast falls in the LAST `val_horizon` days
+    # of the train period; training = windows whose forecast ends BEFORE that.
+    # Windows straddling the boundary are dropped so val never leaks into train.
+    train_end = pd.Timestamp(train_raw["date"].max())
+    val_cutoff = train_end - pd.Timedelta(days=cfg.val_horizon)
+    tgt_end_ts = pd.to_datetime(tgt_end)
+    is_val   = tgt_end_ts >  val_cutoff
+    is_train = tgt_end_ts <= (val_cutoff - pd.Timedelta(days=cfg.H))  # full buffer
+    n_val = int(is_val.sum())
+    use_val = n_val >= 32                       # need a meaningful val set
+    if not use_val:
+        is_train = np.ones(len(Xp), dtype=bool)  # fall back: train on everything
+    print(f"    windows: {len(Xp):,} total -> train={int(is_train.sum()):,}  "
+          f"val={n_val if use_val else 0:,}  (val = last {cfg.val_horizon}d of train)")
 
-    # --- 2) model + train loop --------------------------------------------
+    def _loader(mask, shuffle):
+        return DataLoader(
+            TensorDataset(torch.from_numpy(Xp[mask]), torch.from_numpy(Xf[mask]),
+                          torch.from_numpy(ids[mask]), torch.from_numpy(Y[mask])),
+            batch_size=cfg.batch_size, shuffle=shuffle, drop_last=False)
+
+    train_loader = _loader(is_train, shuffle=True)
+    val_loader = _loader(is_val, shuffle=False) if use_val else None
+
+    # --- 2) model + loss --------------------------------------------------
     model = LSTMSeq2Seq(n_items=len(item_to_idx),
                         hidden=cfg.hidden,
                         item_embed_dim=cfg.item_embed_dim,
@@ -333,30 +364,69 @@ def train_and_predict_seq2seq(
         loss_fn = nn.MSELoss()
         print("    loss: MSE")
 
-    epoch_losses = []
+    # --- 3) train loop with early stopping --------------------------------
+    epoch_losses, val_losses = [], []
+    best_val = float("inf"); best_state = None; best_epoch = 0; stale = 0
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         running, n = 0.0, 0
-        for xp, xf, ib, yb in loader:
+        for xp, xf, ib, yb in train_loader:
             xp, xf, ib, yb = xp.to(device), xf.to(device), ib.to(device), yb.to(device)
             opt.zero_grad()
-            pred = model(xp, xf, ib)              # (B, H)
-            loss = loss_fn(pred, yb)
+            loss = loss_fn(model(xp, xf, ib), yb)
             loss.backward()
             opt.step()
             running += loss.item() * yb.size(0); n += yb.size(0)
-        avg = running / n
-        epoch_losses.append(avg)
-        print(f"    epoch {epoch}/{cfg.epochs}  loss={avg:.4f}")
+        train_loss = running / max(n, 1)
+        epoch_losses.append(train_loss)
 
-    # --- 3) single-forward-pass forecast ----------------------------------
+        if use_val:
+            val_loss = _eval_loss(model, val_loader, loss_fn, device)
+            val_losses.append(val_loss)
+            improved = val_loss < best_val - cfg.min_delta
+            if improved:
+                best_val = val_loss; best_epoch = epoch; stale = 0
+                best_state = {k: v.detach().cpu().clone()
+                              for k, v in model.state_dict().items()}
+            else:
+                stale += 1
+            print(f"    epoch {epoch:2d}/{cfg.epochs}  train={train_loss:.4f}  "
+                  f"val={val_loss:.4f}  {'*' if improved else f'(stale {stale})'}")
+            if stale >= cfg.patience:
+                print(f"    early stop at epoch {epoch} (best val={best_val:.4f} "
+                      f"@ epoch {best_epoch})")
+                break
+        else:
+            print(f"    epoch {epoch:2d}/{cfg.epochs}  train={train_loss:.4f}")
+
+    # restore best weights (the whole point of early stopping)
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    # --- 4) single-forward-pass forecast ----------------------------------
     preds_df = _seq2seq_predict(model, full_raw, train_raw, test_raw,
                                 item_to_idx, price_stats, cfg, device)
     info = {"epoch_losses": epoch_losses,
-            "n_windows": int(len(Xp)),
+            "val_losses": val_losses,
+            "best_epoch": best_epoch,
+            "best_val_loss": best_val if use_val else None,
+            "n_windows": int(is_train.sum()),
+            "n_val_windows": n_val if use_val else 0,
             "n_items": len(item_to_idx),
             "device": str(device)}
     return preds_df, info
+
+
+def _eval_loss(model, loader, loss_fn, device) -> float:
+    """Mean loss over a loader, no grad. Used for val monitoring / early stopping."""
+    model.eval()
+    total, n = 0.0, 0
+    with torch.no_grad():
+        for xp, xf, ib, yb in loader:
+            xp, xf, ib, yb = xp.to(device), xf.to(device), ib.to(device), yb.to(device)
+            loss = loss_fn(model(xp, xf, ib), yb)
+            total += loss.item() * yb.size(0); n += yb.size(0)
+    return total / max(n, 1)
 
 
 def _seq2seq_predict(model, full_raw, train_raw, test_raw,

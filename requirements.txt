@@ -1,6 +1,7 @@
-# Reproducibility manifest. Per our plan we install LAZILY (per phase) to keep
-# early setup light; this file lists everything so a clean-room `make install`
-# can rebuild the full environment. Versions get frozen at v1 (pip freeze).
+# Human-readable dependency ranges (what the project needs and why).
+# For a BYTE-IDENTICAL rebuild use the pinned lockfile instead:
+#     python3.12 -m venv .venv && .venv/bin/pip install -r requirements.lock
+# requirements.lock is `pip freeze` of the known-good env (Python 3.12.12).
 
 # ---- Phase 0/1: data + EDA (installed now) ----
 pandas>=2.2
@@ -11,11 +12,11 @@ seaborn>=0.13
 jupyter>=1.0
 
 # ---- Phase 2: classical + ML baselines (install before Phase 2) ----
-statsforecast>=1.7
-statsmodels>=0.14
-prophet>=1.1
-lightgbm>=4.3
+statsforecast>=1.7        # AutoETS (champion), AutoARIMA
+statsmodels>=0.14         # STL, ADF/KPSS, ACF/PACF in EDA
+lightgbm>=4.3             # gradient-boosted baseline (Tweedie objective)
 scikit-learn>=1.4
+# prophet  -- evaluated but NOT used (weak yearly seasonality, F_s=0.36); omitted
 
 # ---- Phase 3: deep-learning challenger (install before Phase 3) ----
 torch>=2.2

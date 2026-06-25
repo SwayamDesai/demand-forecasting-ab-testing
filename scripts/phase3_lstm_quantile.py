@@ -104,19 +104,26 @@ def main():
             rows.append(agg)
             preds["model"] = "lstm_seq2seq_q80"; preds["fold"] = fold.name
             all_preds.append(preds)
-            losses[fold.name] = info["epoch_losses"]
+            losses[fold.name] = {"train": info["epoch_losses"],
+                                 "val": info.get("val_losses", []),
+                                 "best_epoch": info.get("best_epoch", 0)}
 
             for ep, l in enumerate(info["epoch_losses"], 1):
                 mlflow.log_metric("train_loss", l, step=ep)
+            for ep, l in enumerate(info.get("val_losses", []), 1):
+                mlflow.log_metric("val_loss", l, step=ep)
             mlflow.log_metrics({"wmape_vw": agg["wmape_vw"],
                                 "wmape_uw": agg["wmape_uw"],
                                 "rmse": agg["rmse_mean"],
                                 "mase": agg["mase_median"],
                                 "bias_units": agg["bias_units"],
                                 "train_secs": dt,
-                                "n_windows": info["n_windows"]})
+                                "n_windows": info["n_windows"],
+                                "n_val_windows": info.get("n_val_windows", 0),
+                                "best_epoch": info.get("best_epoch", 0),
+                                "epochs_run": len(info["epoch_losses"])})
             mlflow.set_tags({"phase": "3", "model_family": "lstm_seq2seq_q80",
-                             "device": info["device"]})
+                             "device": info["device"], "early_stopping": "on"})
             print(f"  WMAPE-vw={agg['wmape_vw']:.3f}  WMAPE-uw={agg['wmape_uw']:.3f}  "
                   f"RMSE={agg['rmse_mean']:.2f}  MASE={agg['mase_median']:.2f}  "
                   f"BIAS={agg['bias_units']:+.0f} units  ({dt:.1f}s on {info['device']})")
@@ -215,12 +222,21 @@ def plot_bias_comparison(q80_preds, raw_df, folds):
 
 
 def plot_loss_curves(losses):
-    fig, ax = plt.subplots(figsize=(8, 4))
-    for fold_name, ls in losses.items():
-        ax.plot(range(1, len(ls) + 1), ls, marker="o", label=fold_name)
-    ax.set_xlabel("epoch"); ax.set_ylabel("pinball loss (log1p scale)")
-    ax.set_title(f"Quantile-LSTM training loss per fold (tau={QUANTILE})")
-    ax.legend()
+    fig, ax = plt.subplots(figsize=(9, 4))
+    colors = plt.cm.tab10.colors
+    for i, (fold_name, d) in enumerate(losses.items()):
+        c = colors[i % len(colors)]
+        tr = d["train"]; va = d["val"]; be = d["best_epoch"]
+        ax.plot(range(1, len(tr) + 1), tr, marker="o", ms=3, color=c,
+                label=f"{fold_name} train")
+        if va:
+            ax.plot(range(1, len(va) + 1), va, marker="s", ms=3, ls="--", color=c,
+                    label=f"{fold_name} val")
+        if be:
+            ax.axvline(be, color=c, lw=0.8, alpha=0.4)
+    ax.set_xlabel("epoch"); ax.set_ylabel(f"pinball loss (tau={QUANTILE}, log1p)")
+    ax.set_title(f"Quantile-LSTM train vs val loss (vline = best epoch / early stop)")
+    ax.legend(fontsize=7, ncol=3)
     _save(fig, "03_training_loss")
 
 
