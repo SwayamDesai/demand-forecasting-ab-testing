@@ -172,6 +172,66 @@ def two_proportion_z_test(p1: float, n1: int, p2: float, n2: int) -> dict:
             "lift_pp": (p2 - p1) * 100, "z": z, "p_value": p_value}
 
 
+@dataclass
+class PairedResult:
+    n: int
+    mean_a: float; mean_b: float          # a = baseline (champion), b = challenger
+    mean_diff: float                       # b - a  (negative = challenger cheaper)
+    pct_change: float                      # mean_diff / mean_a * 100
+    median_diff: float
+    pct_units_b_better: float              # % of paired units where b < a
+    wilcoxon_p: float                      # paired non-parametric (primary)
+    ttest_rel_p: float                     # paired t-test
+    normality_ok: bool                     # of the per-unit differences
+    ci95_low: float; ci95_high: float      # bootstrap CI on the MEAN difference
+
+
+def paired_diff_test(values_a: np.ndarray, values_b: np.ndarray,
+                     n_bootstrap: int = 2000, seed: int = 0) -> PairedResult:
+    """
+    PAIRED comparison: each unit i has BOTH outcomes (a_i, b_i).
+
+    Why this beats the unpaired analyze_cost(): when a_i and b_i are positively
+    correlated across units (big SKUs cost a lot under both models), the variance
+    of the difference d_i = b_i - a_i is far smaller than the variance of either
+    arm alone -- between-unit variance cancels. That's exactly the variance that
+    inflated the unpaired CI. Plus every unit contributes (no arm split), so n
+    roughly doubles. Both effects tighten the CI.
+
+    Primary test = Wilcoxon signed-rank (paired, robust to the skew in costs).
+    CI = paired bootstrap on the mean of d_i.
+    """
+    a = np.asarray(values_a, dtype=float)
+    b = np.asarray(values_b, dtype=float)
+    assert len(a) == len(b), "paired test needs equal-length, aligned arrays"
+    d = b - a
+
+    _, p_norm = stats.shapiro(d[: min(len(d), 5000)])
+    normality_ok = bool(p_norm > 0.05)
+    try:
+        _, wp = stats.wilcoxon(d, alternative="two-sided")
+    except ValueError:                      # all-zero differences
+        wp = float("nan")
+    _, tp = stats.ttest_rel(b, a)
+
+    rng = np.random.default_rng(seed)
+    idx = np.arange(len(d))
+    boots = np.array([d[rng.choice(idx, size=len(d), replace=True)].mean()
+                      for _ in range(n_bootstrap)])
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+
+    mean_a = float(a.mean())
+    return PairedResult(
+        n=len(d), mean_a=mean_a, mean_b=float(b.mean()),
+        mean_diff=float(d.mean()),
+        pct_change=float(d.mean() / mean_a * 100) if mean_a else float("nan"),
+        median_diff=float(np.median(d)),
+        pct_units_b_better=float((d < 0).mean() * 100),
+        wilcoxon_p=float(wp), ttest_rel_p=float(tp), normality_ok=normality_ok,
+        ci95_low=float(lo), ci95_high=float(hi),
+    )
+
+
 # ---- decision rule (stated up-front, evaluated at end) ----------------------
 
 def recommend(cost: CostAnalysis, wmape_change_pct: float) -> tuple[str, dict]:

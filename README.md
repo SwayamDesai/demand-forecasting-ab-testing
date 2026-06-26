@@ -36,7 +36,16 @@ rolling-origin folds (28-day horizon each), then ran two A/B tests on simulated 
 
 **Integrity check (Tier 2c — the honest re-run).** The first SHIP had two methodology smells: τ was chosen on the same backtest its p-value was reported on (selection bias), and the service guardrail was adopted after seeing a failure (goalpost-moving). So we re-ran it clean: **decision rule + guardrail pre-registered**, τ **selected on folds 1+2**, then confirmed **once** on the **untouched fold 3**. Held-out result: **cost −7.9%, p=0.007 (Mann-Whitney), stockouts +1.8pp → SHIP.** The win replicated on data it wasn't selected on.
 
-> Residual caveats we do *not* paper over: even on the held-out fold the bootstrap CI on the *mean* cost diff is [−17, +8.5] (crosses zero — the SHIP leans on the rank test, not the mean, because cost is heavily right-skewed); the stockout margin is thin (+1.8pp vs a 2.0pp guardrail); n≈449/arm is underpowered (MDE ~25%); and the entire cost layer is a *simulation* on an assumed 5:1 cost ratio (M5 logs sales, not demand). **Correct real-world action: a monitored 10% pilot, not a blind full rollout.**
+**Paired counterfactual test (Tier 2d — the statistically-correct design for an offline A/B).** The unpaired test above compared two disjoint groups, so between-SKU variance (a few huge SKUs) swamped the signal and the mean-cost CI crossed zero. Because this is a *simulation*, every SKU has a cost under *both* models, so the correct test is **paired** (compare each SKU to itself). It cancels between-SKU variance and uses all 900 SKUs:
+
+| Test (held-out fold_3) | Cost change | p-value | 95% CI on mean diff | CI crosses 0? |
+|---|---|---|---|---|
+| Unpaired | −7.9% | 7×10⁻³ | [−17.0, **+8.5**] | ❌ yes (fragile) |
+| **Paired (correct)** | **−14.3%** | **2×10⁻³⁵** | **[−13.8, −8.1]** | ✅ **no (solid)** |
+
+CI width collapsed 26 → 6 and now sits entirely below zero: **the cost saving is real and statistically airtight.** But the cleaner measurement also showed the held-out stockout change is **+2.16pp**, which *just breaches* the pre-registered +2.0pp service guardrail. By our own up-front rule, that is a **HOLD** — we did **not** move the guardrail to manufacture a SHIP.
+
+**Final, most-rigorous verdict:** τ=0.90 definitively cuts cost ~13–14% (p≈10⁻³⁵), but exceeds the service guardrail by a hair. **Recommendation: retune to τ≈0.87 and re-confirm**, then roll out as a monitored pilot. Remaining honest limits: cost is *simulated* on an assumed 5:1 ratio (M5 logs sales, not demand), 900-series sample, SKU-level randomisation assumes no cross-SKU interference (SUTVA).
 
 **Why this matters for the resume:** building a model that *wins on accuracy* is easy. The rest of the system — a stratified A/B with power analysis, a cost simulator, a guardrail that catches a real failure mode, an error analysis that explains the failure, and a quantile sweep that engineers the fix into a significant go decision — is what separates a hired DS from someone who only does Kaggle.
 
