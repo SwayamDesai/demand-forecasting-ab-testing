@@ -1,0 +1,2 @@
+cost_pct,cost_p,ci_low,ci_high,test,stockout_c,stockout_t,stockout_pp,mde_pct,n_per_arm,tau,decision,cost_ok,sig_ok,guard_ok
+-7.941842053539197,0.006809059836664796,-16.96987441913293,8.535493632067324,mann_whitney_u,4.529616724738676,6.307667833280306,1.7780511085416297,25.00386210077175,449,0.9,SHIP,True,True,True
