@@ -18,5 +18,10 @@ mlflow.db-journal
 # os cruft
 .DS_Store
 
-# NOTE: reports/ (Tableau .twbx, Power BI .pbix, screenshots) is intentionally
-# tracked — those are portfolio deliverables.
+# NOTE: reports/ PNG plots + small summary CSVs are intentionally tracked so they
+# render on GitHub without anyone running the pipeline. But the LARGE, fully
+# regenerable derived tables are not — regenerate them with the phase scripts.
+reports/phase5_dashboards/forecasts_long.csv
+reports/phase5_dashboards/ab_readout.csv
+reports/phase4_experiment/experiment_long_table.csv
+reports/phase4_experiment_v2/experiment_long_table.csv

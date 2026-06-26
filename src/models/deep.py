@@ -56,6 +56,14 @@ def get_device() -> torch.device:
 # ---- model ------------------------------------------------------------------
 
 class LSTMForecaster(nn.Module):
+    """
+    FIRST attempt: sequence-to-one LSTM used with RECURSIVE multi-step forecasting
+    (feed each prediction back in as the next step's input). It mean-collapsed --
+    errors compounded over the 28-day horizon and it lost to seasonal-naive.
+
+    Kept deliberately to document that failure mode; the production challenger is
+    `LSTMSeq2Seq` below, which predicts all 28 days in one pass (no compounding).
+    """
     def __init__(self, n_items: int, n_ts_features: int = N_TS_FEATURES,
                  item_embed_dim: int = 8, hidden: int = 64, dropout: float = 0.2):
         super().__init__()
