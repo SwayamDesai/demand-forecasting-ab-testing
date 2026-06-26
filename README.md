@@ -1,5 +1,9 @@
 # Demand Forecasting with Champion–Challenger A/B Testing
 
+[![CI](https://github.com/SwayamDesai/demand-forecasting-ab-testing/actions/workflows/ci.yml/badge.svg)](https://github.com/SwayamDesai/demand-forecasting-ab-testing/actions/workflows/ci.yml)
+&nbsp;![python](https://img.shields.io/badge/python-3.12-blue)
+&nbsp;![license](https://img.shields.io/badge/license-MIT-green)
+
 A retail demand-forecasting **decision system** on the Walmart M5 dataset. It doesn't just
 train a forecasting model — it runs the full pipeline a real data-science team uses to gate a
 model launch:
