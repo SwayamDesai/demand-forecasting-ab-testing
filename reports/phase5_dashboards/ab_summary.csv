@@ -1,3 +1,0 @@
-scope,n_skus,champion_mean_cost,challenger_mean_cost,cost_pct_change,wilcoxon_p,ci95_low,ci95_high,pct_skus_cheaper,stockout_champion_pct,stockout_challenger_pct,stockout_change_pp,decision
-fold_3 (confirmatory),900,76.45,65.55,-14.26,2.1025414756070434e-35,-13.77,-8.1,50.6,4.39,6.55,2.16,HOLD
-all folds (context),900,232.58,202.49,-12.94,3.2374032200451624e-35,-37.15,-23.64,56.8,4.27,5.69,1.43,SHIP

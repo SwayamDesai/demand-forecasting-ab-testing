@@ -1,79 +1,47 @@
-"""Real assertions for src.metrics."""
-from __future__ import annotations
-
-import math
-
+"""Unit tests for the metrics module -- the numbers everything else is judged by."""
 import numpy as np
 import pytest
 
-from src.metrics import mase, rmse, wmape
+from src import metrics
 
 
-def test_rmse_perfect_prediction_is_zero():
-    y = np.array([1, 2, 3, 4, 5], dtype=float)
-    assert rmse(y, y) == 0.0
-
-
-def test_rmse_known_value():
-    # errors: 1, -1, 1, -1 -> squared 1,1,1,1 -> mean 1 -> sqrt 1
-    y_true = np.array([1, 2, 3, 4], dtype=float)
-    y_pred = np.array([0, 3, 2, 5], dtype=float)
-    assert rmse(y_true, y_pred) == pytest.approx(1.0)
-
-
-def test_wmape_perfect_prediction_is_zero():
-    y = np.array([1, 2, 3, 4], dtype=float)
-    assert wmape(y, y) == 0.0
+def test_wmape_perfect_is_zero():
+    y = [0, 1, 5, 0, 3]
+    assert metrics.wmape(y, y) == 0.0
 
 
 def test_wmape_known_value():
-    # |err| = [1,1,1,1] sum=4 ; |y|=[1,2,3,4] sum=10 -> 0.4
-    y_true = np.array([1, 2, 3, 4], dtype=float)
-    y_pred = np.array([0, 3, 2, 5], dtype=float)
-    assert wmape(y_true, y_pred) == pytest.approx(0.4)
+    # errors sum to 2 over actuals summing to 8 -> 0.25
+    y = [2, 2, 2, 2]
+    p = [3, 2, 2, 1]
+    assert metrics.wmape(y, p) == pytest.approx(2 / 8)
 
 
-def test_wmape_robust_to_zero_truth_rows():
-    # individual zero-truth rows do NOT blow up wmape (unlike plain MAPE)
-    y_true = np.array([0, 0, 5, 0, 5], dtype=float)
-    y_pred = np.array([1, 0, 5, 0, 5], dtype=float)
-    # |err|=1, sum|y|=10 -> 0.1
-    assert wmape(y_true, y_pred) == pytest.approx(0.1)
+def test_wmape_all_zero_truth_is_nan():
+    assert np.isnan(metrics.wmape([0, 0, 0], [1, 2, 3]))
 
 
-def test_wmape_nan_when_truth_all_zero():
-    y_true = np.zeros(5)
-    y_pred = np.array([1, 0, 0, 0, 0], dtype=float)
-    assert math.isnan(wmape(y_true, y_pred))
+def test_bias_sign_under_and_over():
+    y = [10, 10]
+    assert metrics.bias_pct(y, [8, 8]) == pytest.approx(-20.0)   # under-forecast
+    assert metrics.bias_pct(y, [12, 12]) == pytest.approx(+20.0)  # over-forecast
 
 
-def test_mase_equals_one_for_seasonal_naive_replay():
-    # If pred = seasonal-naive (y_t = y_{t-season}) of train, MAE matches the scale
-    rng = np.random.default_rng(0)
-    season = 7
-    y_train = rng.integers(0, 20, size=200).astype(float)
-    # use the same scaling formula as the forecast error -> MASE ~ 1
-    y_true = y_train[-14:]
-    y_pred = y_train[-14 - season : -season]  # seasonal-naive on the same data
-    val = mase(y_true, y_pred, y_train, season=season)
-    # not exactly 1 because train slice differs, but should be close to it
-    assert 0.5 <= val <= 2.0
+def test_seasonal_naive_scale_and_mase():
+    # season=2 perfectly periodic -> in-sample seasonal-naive error 0 -> scale NaN
+    y_train = [1, 5, 1, 5, 1, 5]
+    assert np.isnan(metrics.seasonal_naive_scale(y_train, season=2))
+    # non-trivial scale
+    y_train = [1, 2, 3, 4, 5, 6]            # |t - (t-2)| = 2 everywhere -> scale 2
+    scale = metrics.seasonal_naive_scale(y_train, season=2)
+    assert scale == pytest.approx(2.0)
+    # MASE: MAE 1 vs scale 2 -> 0.5
+    assert metrics.mase([10, 10], [9, 11], scale) == pytest.approx(0.5)
 
 
-def test_mase_lt_one_when_we_beat_naive():
-    # noisy weekly series so the seasonal-naive scale is nonzero
-    rng = np.random.default_rng(42)
-    season = 7
-    y_train = (np.tile([1, 2, 3, 4, 5, 6, 7], 30).astype(float)
-               + rng.normal(0, 1, 210))
-    y_true = np.array([1, 2, 3, 4, 5, 6, 7], dtype=float)
-    y_pred = y_true.copy()  # perfect forecast
-    val = mase(y_true, y_pred, y_train, season=season)
-    assert val == 0.0
+def test_mase_undefined_scale_is_nan():
+    assert np.isnan(metrics.mase([1, 2], [1, 2], float("nan")))
 
 
-def test_mase_nan_for_flat_training_series():
-    y_train = np.ones(100, dtype=float)
-    y_true = np.array([1, 1, 1], dtype=float)
-    y_pred = np.array([1, 1, 1], dtype=float)
-    assert math.isnan(mase(y_true, y_pred, y_train))
+def test_rmse_known_value():
+    assert metrics.rmse([0, 0], [3, 4]) == pytest.approx(np.sqrt((9 + 16) / 2))

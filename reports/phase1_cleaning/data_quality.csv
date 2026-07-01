@@ -1,0 +1,13 @@
+check,passed,detail
+series_count_900,True,900 series
+balanced_by_category,True,"{'FOODS': 300, 'HOBBIES': 300, 'HOUSEHOLD': 300}"
+balanced_by_store,True,"{'CA_1': 300, 'TX_1': 300, 'WI_1': 300}"
+no_duplicate_id_date,True,0 dup rows
+full_calendar_per_series,True,"expected 1941/series; min=1941, max=1941"
+sales_non_null,True,0 nulls
+sales_non_negative,True,min=0
+date_is_datetime,True,datetime64[ns]
+active_rows_have_price,True,0.000% of active rows missing price
+prelaunch_has_no_price,True,0 pre-launch rows with a price
+is_active_monotonic,True,0 series toggle off after launch
+calendar_fully_joined,True,"nulls: {'date': 0, 'wday': 0, 'wm_yr_wk': 0}"

@@ -1,27 +1,18 @@
-# raw + processed data (downloaded via `make data`, never committed)
+# data is downloaded/derived locally, never committed
 data/
 
-# python virtualenv + caches
-.venv/
+# python
 __pycache__/
-*.py[cod]
-*.egg-info/
+*.pyc
 .pytest_cache/
-.ipynb_checkpoints/
+.venv/
+venv/
 
-# experiment tracking artifacts
-mlruns/
-mlartifacts/
-mlflow.db
-mlflow.db-journal
-
-# os cruft
+# os / editor
 .DS_Store
+.idea/
+.vscode/
 
-# NOTE: reports/ PNG plots + small summary CSVs are intentionally tracked so they
-# render on GitHub without anyone running the pipeline. But the LARGE, fully
-# regenerable derived tables are not — regenerate them with the phase scripts.
-reports/phase5_dashboards/forecasts_long.csv
-reports/phase5_dashboards/ab_readout.csv
-reports/phase4_experiment/experiment_long_table.csv
-reports/phase4_experiment_v2/experiment_long_table.csv
+# experiment tracking / scratch
+mlruns/
+*.log

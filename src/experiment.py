@@ -1,22 +1,21 @@
 """
-Champion-challenger A/B test (Phase 4). Industry-standard, kept lean.
+A/B-test machinery for Phase 8: a newsvendor business simulation plus the
+statistics to judge it honestly. Pure functions, unit-tested.
 
-Unit of analysis: store-SKU (n=300 in our sample).
-Population is split: stratified 50/50 by demand-volume tertile.
-  - control arm   -> orders driven by Phase 2 champion (LightGBM)
-  - treatment arm -> orders driven by Phase 3 challenger (LSTM seq2seq)
+The decision a forecast actually drives is an ORDER. So we score forecasts by the
+money that order policy costs, not by error alone:
 
-Each series-day we run a newsvendor simulation:
-  order      = max(0, round(forecast + safety_stock))
-  stockouts  = max(0, actual_demand - order)
-  holding    = max(0, order - actual_demand)
-  cost       = h_stockout * stockouts + h_holding * holding
+  newsvendor: order = forecast + z(tau*) * sigma_series,   tau* = cu / (cu + co)
+              cost  = cu * understock_units + co * overstock_units
 
-Industry defaults (per user): h_stockout : h_holding = 5 : 1, service level 95% -> z=1.645.
+cu = stockout (underage) cost/unit, co = holding (overage) cost/unit. The SAME z and
+sigma are applied to both model arms, so the arms differ only by their forecast --
+a fair test of "which forecast makes the cheaper order".
 
-We then compare arms via (a) Welch's t-test on per-series total cost,
-(b) two-proportion z-test on stockout day-rate, plus a guardrail (WMAPE) so
-we don't celebrate cost wins that came from accuracy losses.
+Two comparisons are provided:
+  * unpaired  -> mimics a live randomized experiment (each series sees ONE model)
+  * paired    -> the counterfactual every-series-sees-both design; higher power and
+                 the correct way to read an offline backtest.
 """
 from __future__ import annotations
 
@@ -26,229 +25,115 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# ---- industry defaults ------------------------------------------------------
-H_STOCKOUT_DEFAULT = 5.0           # cost per stocked-out unit
-H_HOLDING_DEFAULT  = 1.0           # cost per held unit
-SERVICE_Z_DEFAULT  = 1.645         # 95% service level -> z = 1.645
 
-DECISION_MIN_COST_REDUCTION_PCT = 5.0
-DECISION_MAX_WMAPE_DEGRADATION_PCT = 5.0
-DECISION_ALPHA = 0.05
+def newsvendor_z(cu: float, co: float) -> float:
+    """Safety-stock multiplier for the critical ratio tau* = cu/(cu+co)."""
+    tau = cu / (cu + co)
+    return float(stats.norm.ppf(tau))
 
 
-# ---- safety stock per series (TS rule #2: cutoff strictly before test) ------
-
-def compute_safety_stock(active_df: pd.DataFrame, cutoff_date: pd.Timestamp,
-                         z: float = SERVICE_Z_DEFAULT) -> pd.Series:
-    """Per-series safety stock = z * std(sales) on data with date <= cutoff."""
-    train = active_df[active_df["date"] <= cutoff_date]
-    sigma = train.groupby("id")["sales"].std().fillna(0)
-    ss = (z * sigma).clip(lower=0).round().astype(int)
-    ss.name = "safety_stock"
-    return ss
-
-
-# ---- simulation -------------------------------------------------------------
-
-def simulate_costs(predictions: pd.DataFrame,
-                   actuals: pd.DataFrame,
-                   safety_stocks: pd.Series,
-                   h_stockout: float = H_STOCKOUT_DEFAULT,
-                   h_holding: float = H_HOLDING_DEFAULT) -> pd.DataFrame:
+def simulate(df: pd.DataFrame, pred_col: str, sigma: pd.Series,
+             cu: float, co: float) -> pd.DataFrame:
     """
-    Returns the predictions df joined to actuals with these columns added:
-      safety_stock, order, stockouts, holding, cost
-    One row per (id, date).
+    Per (series, week): order, understock/overstock units, cost.
+    `df` needs columns [id, y, pred_col]; `sigma` is per-series demand std.
     """
-    df = predictions.merge(actuals[["id", "date", "sales"]],
-                           on=["id", "date"], how="inner")
-    df = df.merge(safety_stocks, on="id", how="left")
-    df["safety_stock"] = df["safety_stock"].fillna(0)
-    df["order"] = (df["y_pred"] + df["safety_stock"]).clip(lower=0).round()
-    df["stockouts"] = (df["sales"] - df["order"]).clip(lower=0)
-    df["holding"]   = (df["order"] - df["sales"]).clip(lower=0)
-    df["cost"] = h_stockout * df["stockouts"] + h_holding * df["holding"]
-    return df
+    z = newsvendor_z(cu, co)
+    out = df[["id", "y", pred_col]].copy()
+    s = out["id"].map(sigma).fillna(0.0).to_numpy()
+    order = np.clip(np.round(out[pred_col].to_numpy() + z * s), 0, None)
+    out["order"] = order
+    out["understock"] = np.clip(out["y"].to_numpy() - order, 0, None)
+    out["overstock"] = np.clip(order - out["y"].to_numpy(), 0, None)
+    out["cost"] = cu * out["understock"] + co * out["overstock"]
+    out["stockout"] = (out["understock"] > 0).astype(int)
+    return out
 
 
-# ---- stratified assignment --------------------------------------------------
+def per_series(sim: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate the per-week sim to one row per series."""
+    g = sim.groupby("id")
+    return pd.DataFrame({
+        "cost": g["cost"].sum(),
+        "understock_units": g["understock"].sum(),
+        "overstock_units": g["overstock"].sum(),
+        "stockout_rate": g["stockout"].mean(),
+        "demand": g["y"].sum(),
+    }).reset_index()
 
-def stratified_assignment(units: pd.DataFrame,
-                          stratify_col: str = "volume_tertile",
+
+def stratified_assignment(units: pd.DataFrame, strata_cols: list[str],
                           seed: int = 42) -> pd.DataFrame:
-    """50/50 random assignment within each stratum.  Returns df[id, arm]."""
+    """50/50 assignment within each stratum -> df[id, arm]."""
     rng = np.random.default_rng(seed)
     rows = []
-    for stratum, g in units.groupby(stratify_col, observed=True):
-        ids = g["id"].to_numpy().copy()
-        rng.shuffle(ids)
-        n_treat = len(ids) // 2
-        treat = set(ids[:n_treat])
+    for _, g in units.groupby(strata_cols, observed=True):
+        ids = g["id"].to_numpy().copy(); rng.shuffle(ids)
+        k = len(ids) // 2
+        treat = set(ids[:k])
         for sid in g["id"]:
             rows.append({"id": sid, "arm": "treatment" if sid in treat else "control"})
     return pd.DataFrame(rows)
 
 
-# ---- power analysis ---------------------------------------------------------
-
-def minimum_detectable_effect(n_per_arm: int, sigma: float,
-                              alpha: float = 0.05, power: float = 0.8) -> float:
-    """
-    Two-sample two-sided test MDE (Cohen's formula):
-      MDE = (z_{alpha/2} + z_{1-beta}) * sigma * sqrt(2 / n)
-    Returns the MDE in the same units as sigma.
-    """
-    z_a = stats.norm.ppf(1 - alpha / 2)
-    z_b = stats.norm.ppf(power)
-    return float((z_a + z_b) * sigma * np.sqrt(2.0 / n_per_arm))
-
-
-# ---- analysis ---------------------------------------------------------------
-
-@dataclass
-class CostAnalysis:
-    mean_control: float; mean_treatment: float
-    diff: float; pct_change: float
-    cohens_d: float
-    ci95_low: float; ci95_high: float
-    test_used: str
-    p_value: float
-    normality_ok: bool
-
-
-def analyze_cost(control_costs: np.ndarray, treatment_costs: np.ndarray,
-                 n_bootstrap: int = 2000, seed: int = 0) -> CostAnalysis:
-    """
-    Per-series total cost, control vs treatment.
-
-    Picks Welch's t-test when both arms look ~normal (Shapiro p > 0.05),
-    Mann-Whitney U otherwise. Reports Cohen's d and a bootstrap 95% CI for
-    the difference in means.
-    """
-    control_costs = np.asarray(control_costs, dtype=float)
-    treatment_costs = np.asarray(treatment_costs, dtype=float)
-    # normality
-    _, p_c = stats.shapiro(control_costs[: min(len(control_costs), 5000)])
-    _, p_t = stats.shapiro(treatment_costs[: min(len(treatment_costs), 5000)])
-    normal_ok = (p_c > 0.05) and (p_t > 0.05)
-    if normal_ok:
-        stat, p = stats.ttest_ind(treatment_costs, control_costs, equal_var=False)
-        test_used = "welch_t"
-    else:
-        stat, p = stats.mannwhitneyu(treatment_costs, control_costs, alternative="two-sided")
-        test_used = "mann_whitney_u"
-
-    mean_c = float(control_costs.mean())
-    mean_t = float(treatment_costs.mean())
-    diff   = mean_t - mean_c
-    pooled = np.sqrt((control_costs.var(ddof=1) + treatment_costs.var(ddof=1)) / 2.0)
-    d = float(diff / pooled) if pooled > 0 else 0.0
-
-    rng = np.random.default_rng(seed)
-    boots = np.empty(n_bootstrap)
-    for i in range(n_bootstrap):
-        bc = rng.choice(control_costs, size=len(control_costs), replace=True)
-        bt = rng.choice(treatment_costs, size=len(treatment_costs), replace=True)
-        boots[i] = bt.mean() - bc.mean()
-    lo, hi = np.percentile(boots, [2.5, 97.5])
-
-    return CostAnalysis(
-        mean_control=mean_c, mean_treatment=mean_t,
-        diff=diff, pct_change=(diff / mean_c * 100) if mean_c else float("nan"),
-        cohens_d=d,
-        ci95_low=float(lo), ci95_high=float(hi),
-        test_used=test_used, p_value=float(p),
-        normality_ok=bool(normal_ok),
-    )
-
-
-def two_proportion_z_test(p1: float, n1: int, p2: float, n2: int) -> dict:
-    """Standard two-sample proportion z-test, two-sided."""
-    p_pool = (p1 * n1 + p2 * n2) / (n1 + n2)
-    se = float(np.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2)))
-    z = (p2 - p1) / se if se > 0 else 0.0
-    p_value = float(2 * (1 - stats.norm.cdf(abs(z))))
-    return {"p_control": p1, "p_treatment": p2,
-            "lift_pp": (p2 - p1) * 100, "z": z, "p_value": p_value}
+def mde(n_per_arm: int, sigma: float, alpha=0.05, power=0.8) -> float:
+    """Two-sample MDE (absolute units): (z_a/2 + z_b) * sigma * sqrt(2/n)."""
+    za = stats.norm.ppf(1 - alpha / 2)
+    zb = stats.norm.ppf(power)
+    return float((za + zb) * sigma * np.sqrt(2.0 / n_per_arm))
 
 
 @dataclass
-class PairedResult:
+class TestResult:
     n: int
-    mean_a: float; mean_b: float          # a = baseline (champion), b = challenger
-    mean_diff: float                       # b - a  (negative = challenger cheaper)
-    pct_change: float                      # mean_diff / mean_a * 100
-    median_diff: float
-    pct_units_b_better: float              # % of paired units where b < a
-    wilcoxon_p: float                      # paired non-parametric (primary)
-    ttest_rel_p: float                     # paired t-test
-    normality_ok: bool                     # of the per-unit differences
-    ci95_low: float; ci95_high: float      # bootstrap CI on the MEAN difference
+    mean_control: float
+    mean_treatment: float
+    pct_change: float
+    p_value: float
+    ci_low: float
+    ci_high: float
+    test: str
+    extra: dict
 
 
-def paired_diff_test(values_a: np.ndarray, values_b: np.ndarray,
-                     n_bootstrap: int = 2000, seed: int = 0) -> PairedResult:
-    """
-    PAIRED comparison: each unit i has BOTH outcomes (a_i, b_i).
+def unpaired_cost_test(control_costs, treatment_costs, seed=0, nb=2000) -> TestResult:
+    c = np.asarray(control_costs, float); t = np.asarray(treatment_costs, float)
+    _, p = stats.mannwhitneyu(t, c, alternative="two-sided")
+    rng = np.random.default_rng(seed)
+    boots = np.array([rng.choice(t, len(t), True).mean() - rng.choice(c, len(c), True).mean()
+                      for _ in range(nb)])
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    mc = c.mean()
+    return TestResult(min(len(c), len(t)), float(mc), float(t.mean()),
+                      float((t.mean() - mc) / mc * 100) if mc else float("nan"),
+                      float(p), float(lo), float(hi), "mann_whitney_u",
+                      {"mde_pct": mde(min(len(c), len(t)), c.std()) / mc * 100 if mc else np.nan})
 
-    Why this beats the unpaired analyze_cost(): when a_i and b_i are positively
-    correlated across units (big SKUs cost a lot under both models), the variance
-    of the difference d_i = b_i - a_i is far smaller than the variance of either
-    arm alone -- between-unit variance cancels. That's exactly the variance that
-    inflated the unpaired CI. Plus every unit contributes (no arm split), so n
-    roughly doubles. Both effects tighten the CI.
 
-    Primary test = Wilcoxon signed-rank (paired, robust to the skew in costs).
-    CI = paired bootstrap on the mean of d_i.
-    """
-    a = np.asarray(values_a, dtype=float)
-    b = np.asarray(values_b, dtype=float)
-    assert len(a) == len(b), "paired test needs equal-length, aligned arrays"
+def paired_cost_test(champ_costs, chall_costs, seed=0, nb=2000) -> TestResult:
+    """Paired: every series has both costs. d = challenger - champion (<0 = cheaper)."""
+    a = np.asarray(champ_costs, float); b = np.asarray(chall_costs, float)
+    assert len(a) == len(b)
     d = b - a
-
-    _, p_norm = stats.shapiro(d[: min(len(d), 5000)])
-    normality_ok = bool(p_norm > 0.05)
     try:
-        _, wp = stats.wilcoxon(d, alternative="two-sided")
-    except ValueError:                      # all-zero differences
-        wp = float("nan")
-    _, tp = stats.ttest_rel(b, a)
-
+        _, p = stats.wilcoxon(d, alternative="two-sided")
+    except ValueError:
+        p = float("nan")
     rng = np.random.default_rng(seed)
     idx = np.arange(len(d))
-    boots = np.array([d[rng.choice(idx, size=len(d), replace=True)].mean()
-                      for _ in range(n_bootstrap)])
+    boots = np.array([d[rng.choice(idx, len(d), True)].mean() for _ in range(nb)])
     lo, hi = np.percentile(boots, [2.5, 97.5])
-
-    mean_a = float(a.mean())
-    return PairedResult(
-        n=len(d), mean_a=mean_a, mean_b=float(b.mean()),
-        mean_diff=float(d.mean()),
-        pct_change=float(d.mean() / mean_a * 100) if mean_a else float("nan"),
-        median_diff=float(np.median(d)),
-        pct_units_b_better=float((d < 0).mean() * 100),
-        wilcoxon_p=float(wp), ttest_rel_p=float(tp), normality_ok=normality_ok,
-        ci95_low=float(lo), ci95_high=float(hi),
-    )
+    ma = a.mean()
+    return TestResult(len(d), float(ma), float(b.mean()),
+                      float(d.mean() / ma * 100) if ma else float("nan"),
+                      float(p), float(lo), float(hi), "wilcoxon_signed_rank",
+                      {"pct_series_cheaper": float((d < 0).mean() * 100),
+                       "median_diff": float(np.median(d))})
 
 
-# ---- decision rule (stated up-front, evaluated at end) ----------------------
-
-def recommend(cost: CostAnalysis, wmape_change_pct: float) -> tuple[str, dict]:
-    """
-    Stated decision rule:
-      SHIP if (cost reduction >= 5%) AND (p < 0.05) AND (WMAPE degrades by <= 5%).
-    Otherwise HOLD.
-    """
-    cost_ok = cost.pct_change <= -DECISION_MIN_COST_REDUCTION_PCT
-    sig_ok  = cost.p_value < DECISION_ALPHA
-    guard_ok = wmape_change_pct <= DECISION_MAX_WMAPE_DEGRADATION_PCT
-    decision = "SHIP" if (cost_ok and sig_ok and guard_ok) else "HOLD"
-    return decision, {
-        "cost_reduction_pct": -cost.pct_change,
-        "cost_ok": cost_ok,
-        "p_value": cost.p_value,
-        "sig_ok": sig_ok,
-        "wmape_change_pct": wmape_change_pct,
-        "guard_ok": guard_ok,
-    }
+def two_proportion_z(p1, n1, p2, n2) -> dict:
+    pool = (p1 * n1 + p2 * n2) / (n1 + n2)
+    se = np.sqrt(pool * (1 - pool) * (1 / n1 + 1 / n2))
+    z = (p2 - p1) / se if se > 0 else 0.0
+    return {"lift_pp": (p2 - p1) * 100, "z": float(z),
+            "p_value": float(2 * (1 - stats.norm.cdf(abs(z))))}

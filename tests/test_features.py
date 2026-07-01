@@ -1,130 +1,75 @@
-"""
-Real assertions for src.features -- with THE critical no-future-leakage guard.
+"""The leakage guard: features for week t may use only weeks strictly before t.
 
-The leakage test is the most important one in this whole project. If it fails,
-your offline metrics are a lie and the model dies in production.
+Two checks on the Phase-2 feature builder:
+  1. lags/rolling stats match a from-scratch recomputation, and
+  2. perturbing sales at week t changes NO feature at week t (the leak test).
 """
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.features import (
-    add_calendar_features,
-    add_lag_features,
-    add_price_features,
-    add_rolling_features,
-    build_features,
-)
+from scripts.phase2_preprocessing import add_features
+
+FEATURE_COLS = [
+    "sales_lag_1", "sales_lag_2", "sales_lag_4", "sales_lag_8", "sales_lag_52",
+    "sales_rmean_4", "sales_rstd_4", "sales_rmean_8", "sales_rstd_8",
+    "sales_rmean_13", "sales_rstd_13", "trailing_zero_rate_8",
+    "weeks_since_last_sale", "price_change_pct", "price_ratio_8w",
+]
 
 
-# ---- fixtures ---------------------------------------------------------------
-
-def _toy(n_per_id: int = 30, n_ids: int = 2, start: str = "2020-01-01") -> pd.DataFrame:
-    """A tiny, fully-controlled long dataframe."""
-    rows = []
-    for sid in range(n_ids):
-        dates = pd.date_range(start, periods=n_per_id, freq="D")
-        rows.append(pd.DataFrame({
-            "id": f"sku_{sid}",
-            "date": dates,
-            "sales": np.arange(1, n_per_id + 1, dtype=float),
-            "sell_price": 10.0 + 0.1 * np.arange(n_per_id),
-            "cat_id": "FOODS",
-            "has_snap": (np.arange(n_per_id) % 4 == 0).astype(int),
-            "wday": dates.dayofweek.values.astype(int) + 1,
-            "month": dates.month.values.astype(int),
-            "year": dates.year.values.astype(int),
-            "has_event": 0,
-            "is_weekend": 0,
-            "is_active": True,
+def _toy_panel(n_weeks=60, seed=3):
+    rng = np.random.default_rng(seed)
+    weeks = pd.date_range("2015-01-02", periods=n_weeks, freq="7D")
+    frames = []
+    for sid in ["a", "b"]:
+        frames.append(pd.DataFrame({
+            "id": sid,
+            "week_end_date": weeks,
+            "sales": rng.poisson(4, n_weeks),
+            "sell_price": 3.0 + rng.normal(0, 0.1, n_weeks).round(2),
         }))
-    return pd.concat(rows, ignore_index=True)
+    return pd.concat(frames, ignore_index=True)
 
 
-# ---- atomic feature tests ---------------------------------------------------
-
-def test_lag_features_have_correct_values_and_nans():
-    df = add_lag_features(_toy(n_per_id=10, n_ids=1), lags=(1, 7))
-    sub = df[df["id"] == "sku_0"].reset_index(drop=True)
-    # sales = 1..10 ; lag_1 should be [NaN, 1, 2, ..., 9]
-    assert sub["sales_lag_1"].iloc[0] != sub["sales_lag_1"].iloc[0]  # NaN
-    assert (sub["sales_lag_1"].iloc[1:].values == sub["sales"].iloc[:-1].values).all()
-    # lag_7: first 7 are NaN, then [1, 2, 3]
-    assert sub["sales_lag_7"].iloc[:7].isna().all()
-    assert (sub["sales_lag_7"].iloc[7:].values == np.arange(1, 4)).all()
+def test_lags_and_rolling_match_manual_recompute():
+    w = add_features(_toy_panel())
+    g = w[w["id"] == "a"].sort_values("week_end_date")
+    exp_lag1 = g["sales"].shift(1)
+    exp_rmean4 = g["sales"].shift(1).rolling(4, min_periods=1).mean()
+    assert np.allclose(g["sales_lag_1"].dropna(), exp_lag1.dropna())
+    assert np.allclose(g["sales_rmean_4"].dropna(), exp_rmean4.dropna())
 
 
-def test_rolling_mean_is_shifted_and_correct():
-    # rmean_3 with shift=1 for sales=[1..10]:
-    # row t uses sales[t-3..t-1] -> NaN, 1, 1.5, 2, 3, 4, 5, 6, 7, 8
-    df = add_rolling_features(_toy(n_per_id=10, n_ids=1), windows=(3,))
-    sub = df[df["id"] == "sku_0"].reset_index(drop=True)
-    expected = [np.nan, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-    got = sub["sales_rmean_3"].tolist()
-    assert np.isnan(got[0]) and np.isnan(expected[0])
-    np.testing.assert_allclose(got[1:], expected[1:])
+def test_no_future_leakage_current_week_cannot_influence_its_features():
+    base = _toy_panel()
+    feats_before = add_features(base.copy())
+
+    # blow up sales in the LAST week of series 'a' -- a huge, unmissable change
+    poked = base.copy()
+    last_ix = poked[poked["id"] == "a"].index[-1]
+    poked.loc[last_ix, "sales"] = 10_000
+
+    feats_after = add_features(poked)
+
+    # the features AT the poked week must be identical: they may only use past weeks
+    a_before = feats_before[(feats_before["id"] == "a")].iloc[-1][FEATURE_COLS]
+    a_after = feats_after[(feats_after["id"] == "a")].iloc[-1][FEATURE_COLS]
+    pd.testing.assert_series_equal(a_before, a_after, check_names=False)
+
+    # and the OTHER series is untouched everywhere
+    b_before = feats_before[feats_before["id"] == "b"][FEATURE_COLS].reset_index(drop=True)
+    b_after = feats_after[feats_after["id"] == "b"][FEATURE_COLS].reset_index(drop=True)
+    pd.testing.assert_frame_equal(b_before, b_after)
 
 
-# ---- THE leakage guard ------------------------------------------------------
-
-def test_no_future_leakage_in_any_lag_or_rolling_feature():
-    """
-    For EVERY row in the engineered frame, EVERY engineered sales-derived feature
-    must be a function of rows strictly EARLIER than that row.
-
-    Procedure (works regardless of feature internals):
-      1. Compute features on the full series.
-      2. For each cut date c, recompute features using only sales[date <= c-1]
-         padded with NaN for date >= c (i.e., 'as if' future were unknown).
-      3. The features for rows with date < c must match between the two runs.
-         If any future-derived feature exists, this will diverge.
-    """
-    df = _toy(n_per_id=40, n_ids=2)
-
-    full = add_rolling_features(add_lag_features(df.copy(), lags=(1, 7, 14)),
-                                windows=(7, 28))
-    feat_cols = [c for c in full.columns if c.startswith("sales_")]
-
-    cut = pd.Timestamp("2020-01-25")
-    masked = df.copy()
-    masked.loc[masked["date"] >= cut, "sales"] = np.nan
-    rebuilt = add_rolling_features(add_lag_features(masked, lags=(1, 7, 14)),
-                                   windows=(7, 28))
-
-    before_cut = full["date"] < cut
-    for col in feat_cols:
-        a = full.loc[before_cut, col].to_numpy()
-        b = rebuilt.loc[before_cut, col].to_numpy()
-        # both NaN counts as equal; otherwise must match exactly
-        equal = (np.isnan(a) & np.isnan(b)) | (a == b)
-        assert equal.all(), f"leakage detected in {col}"
-
-
-# ---- price + calendar -------------------------------------------------------
-
-def test_price_features_run_without_error():
-    df = add_price_features(_toy())
-    assert {"price_change_pct", "price_ratio_28d"}.issubset(df.columns)
-    # first row of each id has no previous price -> NaN
-    first_rows = df.groupby("id").head(1)
-    assert first_rows["price_change_pct"].isna().all()
-
-
-def test_calendar_features_cyclic_encoding_bounds():
-    df = add_calendar_features(_toy())
-    assert df["wday_sin"].between(-1.0, 1.0).all()
-    assert df["wday_cos"].between(-1.0, 1.0).all()
-    assert df["snap_x_food"].dtype.kind in ("i", "u")
-
-
-def test_build_features_pipeline_adds_expected_columns():
-    out = build_features(_toy())
-    expected = {
-        "sales_lag_1", "sales_lag_7", "sales_lag_14", "sales_lag_28",
-        "sales_rmean_7", "sales_rstd_7", "sales_rmean_28", "sales_rstd_28",
-        "price_change_pct", "price_ratio_28d",
-        "wday_sin", "wday_cos", "snap_x_food",
-    }
-    assert expected.issubset(out.columns)
+def test_leak_would_be_caught():
+    """Sanity that the guard has teeth: a deliberately leaky feature DOES differ."""
+    base = _toy_panel()
+    poked = base.copy()
+    last_ix = poked[poked["id"] == "a"].index[-1]
+    poked.loc[last_ix, "sales"] = 10_000
+    # an unshifted rolling mean (leaky by construction) must change at week t
+    leaky_before = base.groupby("id")["sales"].transform(lambda s: s.rolling(4, 1).mean())
+    leaky_after = poked.groupby("id")["sales"].transform(lambda s: s.rolling(4, 1).mean())
+    assert leaky_before.iloc[last_ix] != leaky_after.iloc[last_ix]

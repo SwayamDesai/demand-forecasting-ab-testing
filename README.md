@@ -1,185 +1,182 @@
-# Demand Forecasting with Champion–Challenger A/B Testing
+# Weekly Demand Forecasting — a decision system, not just a model
 
 [![CI](https://github.com/SwayamDesai/demand-forecasting-ab-testing/actions/workflows/ci.yml/badge.svg)](https://github.com/SwayamDesai/demand-forecasting-ab-testing/actions/workflows/ci.yml)
 &nbsp;![python](https://img.shields.io/badge/python-3.12-blue)
 &nbsp;![license](https://img.shields.io/badge/license-MIT-green)
 
-A retail demand-forecasting **decision system** on the Walmart M5 dataset. It doesn't just
-train a forecasting model — it runs the full pipeline a real data-science team uses to gate a
-model launch:
+Retail demand forecasting on the Walmart **M5** dataset, built at the **weekly** grain to cut
+the daily noise, and carried all the way to an honest deploy decision:
 
-> **offline accuracy → simulated business impact → controlled A/B test → honest go / no-go decision.**
+> **clean data → weekly signal → diagnostics → champion → ML/DL challengers → a strong A/B test → go/no-go.**
 
-Forecasts are designed for a **Tableau** dashboard; the experiment readout for **Power BI**.
+The point isn't "I trained a model." It's the full chain a real team uses to decide
+whether a new forecast is worth shipping — and the discipline to say **no** when it isn't.
+
+---
+
+## Why weekly
+
+Daily M5 demand is dominated by noise: **62% of active series-days are zero sales**.
+Aggregating to the Walmart weekly grain collapses that to **24%** (and just **12%**
+volume-weighted). Same data, far better signal-to-noise — so every model below forecasts
+weekly, 4 weeks ahead.
+
+| grain | active zero-rate |
+|---|---|
+| daily | 62.2% |
+| **weekly** | **23.9%** (12.4% volume-weighted) |
 
 ---
 
 ## Headline result
 
-We benchmarked classical, ML, and deep-learning forecasters, then ran a controlled experiment
-that simulates the weekly ordering decision each model would drive (newsvendor policy, 5:1
-stockout-to-holding cost ratio) and measures **money**, not just accuracy.
+Rolling-origin backtest (3 folds × 4-week horizon), primary metric **WMAPE**
+(volume-weighted), with **MASE** and **bias** alongside.
 
-- **Accuracy:** a seq2seq LSTM beat the best classical baseline (ETS) — WMAPE 0.79 vs 0.83.
-- **But accuracy ≠ business value.** The accurate LSTM slightly *under-orders*, causing more
-  stockouts; under a 5:1 cost ratio that made it *more* expensive. The A/B test said **HOLD**.
-- **Diagnosis → fix.** Error analysis showed the under-bias grows with volume. We retrained with
-  **quantile (pinball) loss** so the model deliberately orders a bit higher.
-- **Verdict (rigorous, paired test on a held-out fold):** the cost-aware model cuts simulated
-  cost **~13–14%** — and the saving is now **statistically airtight** (Wilcoxon p ≈ 10⁻³⁵, 95% CI
-  excludes zero). However it **breaches the pre-registered +2 pp stockout guardrail by a hair
-  (+2.16 pp)**, so the honest call is **HOLD-and-retune** (a slightly lower quantile), then a
-  monitored pilot — *not* a blind rollout.
-
-**The point of the project is that last paragraph:** a proven win, an honored guardrail, and a
-precise next step — the difference between a Kaggle notebook and a hireable decision.
-
----
-
-## Why this is industry-level, not a toy
-
-| Most projects stop at… | This project also does… |
-|---|---|
-| "I trained an LSTM" | A real **champion** baseline (ETS/LightGBM) it has to beat |
-| RMSE on a random split | **Rolling-origin backtesting**, **WMAPE/MASE**, a tested **no-future-leakage** guard |
-| "lower error = better" | A **business simulation** (stockouts + holding cost), because accuracy ≠ value |
-| Reporting the best number | A **pre-registered A/B test**, power analysis, guardrails, and a **paired** design |
-| Hiding the wins | **Honest iteration**: failed attempts, a self-audit, and a HOLD we refused to fudge |
-
----
-
-## The story, in plain language
-
-1. **Get messy real data.** 5 years of daily Walmart sales. Key fact: **55% of days a product sells
-   zero** — intermittent demand drives every later choice (e.g. why WMAPE, not RMSE).
-2. **Build a champion.** Classical + ML baselines; ETS wins. This is the bar to beat.
-3. **Build a challenger.** First LSTM mean-collapsed (diagnosed and documented); a seq2seq redesign
-   became the most *accurate* model.
-4. **Test it like a launch.** Simulate the ordering decision, measure cost, run a stratified A/B.
-   Result: **HOLD** — more accurate, but under-orders → costs more.
-5. **Diagnose & fix.** Error analysis pinpoints a volume-scaling under-bias; quantile loss corrects it.
-6. **Confirm honestly.** Pick the quantile on early folds, confirm **once** on an untouched fold,
-   with a pre-registered guardrail; then use a **paired** test for a tight, correct comparison.
-7. **Final verdict:** cost win is real and significant, but service just misses the guardrail →
-   HOLD-and-retune.
-
----
-
-## Key numbers
-
-**Accuracy leaderboard** (volume-weighted WMAPE, lower is better):
-
-| Model | WMAPE-vw |
-|---|---|
-| **LSTM seq2seq** | **0.79** |
-| ETS (champion) | 0.83 |
-| LightGBM | 0.84 |
-| seasonal-naive (floor) | 0.99 |
-
-**A/B test — unpaired vs paired (held-out fold), cost-aware τ=0.90 challenger vs ETS:**
-
-| Test | Cost change | p-value | 95% CI on mean | Crosses 0? |
+| model | WMAPE | bias | MASE (med) | |
 |---|---|---|---|---|
-| Unpaired | −7.9% | 7×10⁻³ | [−17.0, **+8.5**] | yes (fragile) |
-| **Paired (correct)** | **−14.3%** | **2×10⁻³⁵** | **[−13.8, −8.1]** | **no (solid)** |
+| **lightgbm** | **0.4026** | −0.9% | 0.658 | most accurate challenger |
+| ets (champion) | 0.4054 | −3.7% | 0.665 | classical champion |
+| lstm seq2seq | 0.4118 | −1.6% | 0.654 | competitive, well-calibrated |
+| moving_average_4 | 0.4164 | −2.5% | 0.672 | |
+| croston_sba | 0.4389 | −8.6% | 0.679 | intermittent specialist |
+| naive_last | 0.4726 | −4.5% | 0.771 | |
+| seasonal_naive_52 | 0.6335 | −3.5% | 0.942 | weak: per-SKU seasonality is only moderate |
 
-Guardrail (held-out fold): stockout-rate **+2.16 pp** vs a pre-registered **+2.0 pp** limit → **HOLD**.
+**Then the twist that makes this a decision project, not a leaderboard:**
+
+A controlled A/B test simulates the weekly ordering decision each model would drive
+(newsvendor policy, 5:1 stockout:holding) and measures **money**. LightGBM is *more
+accurate* than ETS — but on the paired counterfactual test it costs **+1.2% more**
+(p≈0.045), because its better-centered forecasts over-order the expensive high-volume and
+lumpy SKUs. A cost-ratio sensitivity sweep (3:1 → 9:1) never reaches the ship threshold.
+
+> **Verdict: HOLD.** Accuracy ≠ business value. The disciplined call is to keep the
+> simpler, well-understood ETS champion rather than adopt ML complexity for no business gain.
+
+**Phase 8b — the cost-aware follow-up.** Instead of chasing accuracy, we retrained LightGBM
+with **pinball (quantile) loss** so it predicts the cost-optimal *order quantity* directly
+(the newsvendor 0.833-quantile). Honest protocol: τ swept on folds 1–2 only, winner (τ=0.9)
+confirmed once on untouched fold 3. Result: **−5.6% cost with −0.75pp stockouts** (better
+service), CI [−9.7%, −1.7%] — but the pre-registered Wilcoxon test came back p=0.13, because
+the entire saving concentrates in the top-10% costliest SKUs while the median series is flat.
+A mean-based test (what total dollars follow) gives p=0.007 — but that's post-hoc, so the
+verdict stays **HOLD**, with the fix pre-registered for the next confirmation: a mean-based
+primary test and τ≈0.85–0.87.
+
+**Phase 8c — the pre-registered retest: SHIP.** The follow-up written down in the 8b
+post-mortem, executed on **24 fresh weeks no model was ever scored on** (the windows before
+fold 1), with the dollars-based paired test as the declared primary. τ selected on the 3 older
+windows (winner τ=0.866), confirmed once on the 3 newer: **−6.9% cost** (paired-t p=5×10⁻⁴,
+95% CI [−11.1%, −3.3%]), stockouts **+0.65pp** — inside the guardrail. Both tests now agree
+(Wilcoxon p=1×10⁻³). All three pre-registered gates pass → **SHIP**, scoped to the stated 5:1
+economics: the sensitivity sweep shows the win is specific to ~5:1 (at 3:1 or 9:1 you'd retune
+τ before deploying), so the rollout recommendation is a monitored pilot with the cost ratio
+validated in production.
+
+*The full arc — accuracy didn't pay (HOLD) → diagnosed the mechanism → fixed the right lever
+(the order, not the forecast) → promising but non-significant (HOLD, lesson recorded) →
+pre-registered retest on fresh data → a defensible SHIP. That's a decision process, not a
+leaderboard.*
+
+---
+
+## The phases (each gated by its own quality checks)
+
+| # | phase | what it produces | headline |
+|---|---|---|---|
+| 1 | Data cleaning | clean daily tidy table | 12/12 quality checks pass |
+| 2 | Preprocessing | weekly grain + leakage-safe features | lossless agg; leakage test passes |
+| 3 | EDA | demand/intermittency/seasonality/exogenous | SBC classes; SNAP is nonlinear (use the count) |
+| 4 | TS diagnostics | stationarity, STL, ACF/PACF, transform | d≤1; seasonal 52; log/Tweedie justified |
+| 5 | TS models | classical bake-off | **champion = ETS (0.4054)** |
+| 6 | ML | global Tweedie LightGBM (recursive) | beats ETS by 0.7%, bias −0.9% |
+| 7 | DL | seq2seq LSTM (mean-scaled, no collapse) | competitive, bias −1.6% |
+| 8 | A/B test | newsvendor sim + paired/unpaired + guardrails | **HOLD** (honest no-go) |
+| 8b | Cost-aware retrain | quantile-loss LightGBM orders the τ\*-quantile directly | −5.6% cost, better service — **HOLD** on the pre-registered test, retest specified |
+| 8c | Pre-registered retest | fresh 24 weeks, dollars-based paired test, τ=0.866 | **SHIP**: −6.9% cost (p=5×10⁻⁴), stockouts +0.65pp |
+
+---
+
+## What makes the A/B "strong"
+
+- **Business simulation**: each forecast becomes an order; mistakes priced as understock
+  vs overstock (newsvendor, `order = forecast + z(τ*)·σ`).
+- **Pre-registered decision rule** stated before seeing results.
+- **Paired counterfactual test** (correct, higher-power for an offline backtest) *and* an
+  unpaired stratified test (mimics a live experiment) — they agree it's not a cost win,
+  and the unpaired's wide CI shows why paired is the right design.
+- **Power analysis** (MDE), a **stockout-rate guardrail**, and a **cost-ratio sensitivity**
+  sweep on the verdict's biggest assumption.
 
 ---
 
 ## Selected visuals
 
-Intermittent demand — the fact that shapes the whole project:
-![sales distribution](reports/phase1_eda/02_sales_distribution.png)
+Weekly aggregation makes the signal visible — clear trend + yearly seasonality:
+![STL decomposition](reports/phase4_ts_diagnostics/01_stl_aggregate.png)
 
-The seq2seq LSTM wins on accuracy:
-![accuracy leaderboard](reports/phase3_lstm_seq2seq/01_combined_leaderboard.png)
+The intermittency map that drives the model choices (SBC taxonomy):
+![intermittency](reports/phase3_eda/03_intermittency_sbc.png)
 
-Error analysis — the under-bias grows with volume (the cause of stockouts):
-![bias by tier](reports/tier2_error_analysis/04_bias_by_tier.png)
+The classical bake-off — ETS is the champion every challenger must beat:
+![leaderboard](reports/phase5_baselines/01_leaderboard.png)
 
-Cost-vs-service frontier — which quantile to deploy:
-![frontier](reports/tier2_quantile_sweep/01_cost_service_frontier.png)
+The cost/service frontier that picked the cost-aware policy (Phase 8b selection):
+![frontier](reports/phase8b_cost_aware/01_frontier_selection.png)
 
-The paired test — cost win proven, CI collapses and excludes zero:
-![paired test](reports/tier2_paired_test/paired_test.png)
-
-Dashboard mocks (build recipes in `reports/phase5_dashboards/`):
-![tableau](reports/phase5_dashboards/mock_tableau_forecasts.png)
-![power bi](reports/phase5_dashboards/mock_powerbi_ab.png)
+The verdict: confirmation CI entirely below zero, past the −5% ship line:
+![confirmation](reports/phase8c_retest/01_confirmation_ci.png)
 
 ---
 
-## Rigor & honesty (what a reviewer should check)
+## Rigor & honesty
 
-**Time-series correctness**
-- Split by time only (never shuffle); rolling-origin backtest (3 folds, 28-day horizon).
-- All lag/rolling features `.shift()`-ed; a unit test (`tests/test_features.py`) **fails on any
-  future leakage**.
-- Scalers/encoders fit on the train fold only; LSTM uses validation + early stopping.
-
-**A/B testing done right**
-- Stratified random assignment; power analysis (MDE); tests matched to the data
-  (Mann-Whitney / proportion z / Wilcoxon); a guardrail metric alongside the primary.
-- **Pre-registered** decision rule; quantile chosen on selection folds and confirmed **once** on a
-  held-out fold (no selection-bias / p-hacking).
-- **Paired counterfactual** test — the correct, higher-power design for an offline experiment.
-
-**Honest limitations (not hidden)**
-- Cost is a **simulation** on an assumed 5:1 ratio; M5 logs *sales*, not demand (stockouts censor it).
-- 900-series sample (a slice of full M5); single-store-SKU randomization assumes no cross-SKU
-  interference (SUTVA).
-- Recommendation reflects this: monitored pilot, not blind launch.
+- **No leakage**: time-only splits; every lag/rolling feature `.shift()`-ed; a unit test
+  (`tests/test_features.py`) perturbs the current week and fails if any feature moves.
+  Scalers/stats fit on train only.
+- **Reproducible**: fixed seeds; the slow classical CV is cached; `make`-style phase scripts.
+- **Tested**: 18 unit tests run in CI (metrics, backtest folds, the feature **leakage guard**,
+  newsvendor + paired/unpaired stats).
+- **Honest EDA**: caught and corrected three inflated effect sizes (SNAP, promo, events)
+  that a naive index-then-average method produced.
+- **Honest verdicts**: two HOLDs we refused to fudge (including one where switching the test
+  post-hoc would have "passed"), then a SHIP earned on fresh data with the rule declared first.
 
 ---
 
 ## Repo layout
 
 ```
-.
-├── src/
-│   ├── data.py            # M5 load + clean + dev sample (pandas)
-│   ├── features.py        # lag/rolling/calendar/price — leakage-guarded
-│   ├── metrics.py         # WMAPE, RMSE, MASE
-│   ├── backtest.py        # rolling-origin splits
-│   ├── experiment.py      # A/B: assignment, power, cost sim, paired + unpaired tests
-│   └── models/
-│       ├── baseline.py    # seasonal-naive, ETS, ARIMA, LightGBM
-│       └── deep.py        # LSTM (recursive=1st attempt) + seq2seq + quantile loss
-├── scripts/               # one runnable step per phase (phase1_eda … tier2_paired_test)
-├── tests/                 # pytest incl. the no-leakage guard (run in CI)
-├── reports/               # plots, summaries, dashboard mocks + build recipes
-├── Makefile               # make data / install / test
-└── requirements.txt / requirements.lock
+src/        config, io, metrics, backtest, experiment    (shared modules, unit-tested)
+scripts/    phase1_data_cleaning ... phase8c_retest      (one runnable step per phase)
+tests/      pytest: metrics, backtest folds, feature leakage guard, A/B stats
+reports/    per-phase figures, CSVs, and a SUMMARY.md each (all results are committed)
+data/       not committed -- `make data` downloads the 3 M5 files from Kaggle
 ```
 
 ## How to run
 
 ```bash
-python3.12 -m venv .venv && make install
-make data                                   # M5 from Kaggle (needs ~/.kaggle/access_token)
-.venv/bin/python -m src.data --make-sample  # build the dev parquet
+make install                # python3.12 venv + requirements
+make data                   # M5 from Kaggle (needs ~/.kaggle/kaggle.json)
+source .venv/bin/activate
 
-.venv/bin/python -m scripts.phase1_eda
-.venv/bin/python -m scripts.run_remaining_pipeline   # baselines + LSTMs + A/B, end-to-end
-.venv/bin/python -m scripts.tier2_error_analysis
-.venv/bin/python -m scripts.tier2_quantile_sweep
-.venv/bin/python -m scripts.tier2_honest_rerun       # leakage-free selection→confirmation
-.venv/bin/python -m scripts.tier2_paired_test        # the correct paired A/B
-.venv/bin/python -m scripts.phase5_dashboards
+python -m scripts.phase1_data_cleaning
+python -m scripts.phase2_preprocessing
+python -m scripts.phase3_eda
+python -m scripts.phase4_ts_diagnostics
+python -m scripts.phase5_baselines      # ~8 min first run (AutoETS@52); cached after
+python -m scripts.phase6_lightgbm
+python -m scripts.phase7_lstm
+python -m scripts.phase8_ab_test
+python -m scripts.phase8b_cost_aware    # cost-aware quantile follow-up
+python -m scripts.phase8c_retest        # pre-registered retest -> SHIP
 
-make test                                            # 15 tests incl. leakage guard
-.venv/bin/mlflow ui --backend-store-uri sqlite:///mlflow.db   # every run is tracked
+pytest -q                               # 18 tests (also run in CI)
 ```
 
-## What I'd do next
+(or `make pipeline` for all ten phases end-to-end)
 
-- **Retune τ≈0.87** to pull stockouts back under the guardrail while keeping most of the cost win.
-- **Scale to full M5** to tighten estimates and test generalization.
-- **Cost-ratio sensitivity analysis** (the verdict depends on the 5:1 assumption).
-- Ensemble (ETS + LSTM), hierarchical reconciliation, sequential testing.
-
----
-
-*Built end-to-end as an iterative case study. Tech: Python, pandas/numpy, PyTorch, LightGBM,
-statsforecast, MLflow, scipy/statsmodels, Tableau, Power BI.*
+*Tech: Python, pandas/numpy, statsforecast, LightGBM, PyTorch, scipy/statsmodels, matplotlib.*
+*Sample: 900 store-SKU series (3 stores × 3 categories × 100 items), 2011–2016.*

@@ -1,51 +1,41 @@
-# Demand Forecasting + Champion-Challenger A/B  --  task runner
-# Usage: `make <target>`. Everything runs inside the project venv.
-
+# Weekly demand forecasting -- task runner.  Usage: `make <target>`
 PYTHON := .venv/bin/python
-PIP    := .venv/bin/pip
 KAGGLE := .venv/bin/kaggle
 COMP   := m5-forecasting-accuracy
 RAW    := data/raw
 
-.PHONY: help install data sample features train experiment test clean
+.PHONY: help install data pipeline test
 
 help:
 	@echo "targets:"
-	@echo "  install     install all deps from requirements.txt"
-	@echo "  data        download M5 raw files from Kaggle into data/raw"
-	@echo "  sample      carve the fast dev subset (Phase 1)"
-	@echo "  features    build lag/rolling/calendar features (Phase 2)"
-	@echo "  train       train baselines + deep model (Phase 2/3)"
-	@echo "  experiment  run the A/B experiment + stats (Phase 4)"
-	@echo "  test        run pytest"
+	@echo "  install    create .venv and install requirements"
+	@echo "  data       download the 3 M5 raw files from Kaggle into data/raw"
+	@echo "  pipeline   run all phases end-to-end (1 -> 8c)"
+	@echo "  test       run the unit tests"
 
 install:
-	$(PIP) install --upgrade pip
-	$(PIP) install -r requirements.txt
+	python3.12 -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install -r requirements.txt
 
-# Download only the 3 files we use (~325 MB). Kaggle ships them zipped; unzip + clean up.
 data:
 	mkdir -p $(RAW)
 	$(KAGGLE) competitions download -c $(COMP) -f calendar.csv -p $(RAW)
 	$(KAGGLE) competitions download -c $(COMP) -f sales_train_evaluation.csv -p $(RAW)
 	$(KAGGLE) competitions download -c $(COMP) -f sell_prices.csv -p $(RAW)
 	cd $(RAW) && for z in *.zip; do [ -f "$$z" ] && unzip -o "$$z" && rm -f "$$z" || true; done
-	@echo "raw data ready in $(RAW)"
 
-sample:
-	$(PYTHON) -m src.data --make-sample
-
-features:
-	$(PYTHON) -m src.features
-
-train:
-	$(PYTHON) -m src.models.baseline
-
-experiment:
-	$(PYTHON) -m src.experiment
+pipeline:
+	$(PYTHON) -m scripts.phase1_data_cleaning
+	$(PYTHON) -m scripts.phase2_preprocessing
+	$(PYTHON) -m scripts.phase3_eda
+	$(PYTHON) -m scripts.phase4_ts_diagnostics
+	$(PYTHON) -m scripts.phase5_baselines
+	$(PYTHON) -m scripts.phase6_lightgbm
+	$(PYTHON) -m scripts.phase7_lstm
+	$(PYTHON) -m scripts.phase8_ab_test
+	$(PYTHON) -m scripts.phase8b_cost_aware
+	$(PYTHON) -m scripts.phase8c_retest
 
 test:
 	$(PYTHON) -m pytest -q
-
-clean:
-	rm -rf data/processed/* mlruns
