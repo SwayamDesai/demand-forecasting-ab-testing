@@ -3,16 +3,11 @@ pandas>=2.3
 numpy>=2.0
 pyarrow>=17
 
-# models
-statsforecast>=2.0
+# model
 lightgbm>=4.5
-torch>=2.4
 
-# stats / diagnostics
+# stats + plots + tests
 scipy>=1.14
-statsmodels>=0.14
-
-# plots + tests
 matplotlib>=3.9
 pytest>=8
 

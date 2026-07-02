@@ -1,6 +1,6 @@
 """The leakage guard: features for week t may use only weeks strictly before t.
 
-Two checks on the Phase-2 feature builder:
+Two checks on the feature builder (src/etl.py):
   1. lags/rolling stats match a from-scratch recomputation, and
   2. perturbing sales at week t changes NO feature at week t (the leak test).
 """
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.phase2_preprocessing import add_features
+from src.etl import add_features
 
 FEATURE_COLS = [
     "sales_lag_1", "sales_lag_2", "sales_lag_4", "sales_lag_8", "sales_lag_52",

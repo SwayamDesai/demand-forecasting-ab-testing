@@ -1,11 +1,6 @@
 """
-Project-wide configuration. One place for paths, the sample definition, and the
-backtest setup so every phase reads from the same source of truth.
-
-Design intent (senior-DS, kept deliberately small):
-  - The sample is a STRATIFIED slice of M5 chosen for diversity, not size.
-  - The backtest setup (weekly grain, 4-week horizon, 3 rolling folds) is fixed
-    here so Phases 5-8 cannot silently disagree on what "the test set" is.
+Project-wide configuration: paths and the backtest setup, fixed in one place so
+every step evaluates on the identical folds.
 """
 from __future__ import annotations
 

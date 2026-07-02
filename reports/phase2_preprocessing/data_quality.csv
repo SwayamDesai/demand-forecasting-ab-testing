@@ -1,8 +1,0 @@
-check,passed,detail
-weekly_reconciles_daily,True,"daily=1,461,695 weekly=1,461,695"
-no_duplicate_id_week,True,0 dup rows
-kept_weeks_full_active,True,"n_days in [np.int64(7)], n_active in [np.int64(7)]"
-weeks_contiguous_7d,True,max within-series gap = 7 days (expect 7)
-kept_weeks_have_price,True,0.000% null price
-features_leakage_free,True,0 mismatches over 25 sampled series
-lag1_not_current_week,True,25.5% rows where lag_1==sales (coincidental zeros ok)

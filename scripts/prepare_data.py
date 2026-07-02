@@ -1,36 +1,30 @@
 """
-Full-M5 scale, step 1 -- chunked ETL: raw -> weekly features, ONE STORE AT A TIME.
+Step 1 -- data: raw M5 -> weekly features, processed ONE STORE AT A TIME.
 
-Why chunked: melting all 30,490 series at once creates a ~59M-row daily frame whose
-merges need 20-30GB -- fatal on a 16GB machine. Per store it's a 5.9M-row frame
-(~0.5GB peak), aggregated to weekly (~700K rows) and released before the next store.
-This is the same "per-store" discipline the M5 winners used.
-
-Reuses the SAME cleaning/aggregation/feature functions as the 900-series pipeline
-(scripts.phase1_data_cleaning / phase2_preprocessing) -- no logic forks to audit.
+Melting all 30,490 series at once creates a ~59M-row daily frame whose merges need
+20-30GB of RAM. Per store it's a 5.9M-row frame (~0.5GB peak), aggregated to weekly
+(~700K rows) and released before the next store -- the per-store discipline the M5
+winners used, and it keeps the whole step under ~4GB on a 16GB machine.
 
 Checkpointed: a store whose parquet already exists is skipped, so a crash resumes.
 
 Outputs:
-  data/processed/full/weekly_{STORE}.parquet   (one per store, feature-complete)
-  reports/full_m5/data_validation.csv          (per-store reconciliation)
+  data/processed/weekly/weekly_{STORE}.parquet   (one per store, feature-complete)
+  reports/data_validation.csv                    (per-store reconciliation)
 """
 from __future__ import annotations
 
 import gc
 import resource
 
-import numpy as np
 import pandas as pd
 
-from src import config
-from scripts.phase1_data_cleaning import add_flags, join_calendar, join_prices, melt_long
-from scripts.phase2_preprocessing import add_features, aggregate_weekly, keep_full_active
+from src import config, etl
 
 pd.options.mode.copy_on_write = True
 
-OUT_DATA = config.PROCESSED / "full"
-OUT_REP = config.REPORTS / "full_m5"
+OUT_DATA = config.PROCESSED / "weekly"
+OUT_REP = config.REPORTS
 
 
 def rss_gb() -> float:
@@ -79,26 +73,26 @@ def main() -> None:
 
         print(f"[{store}] melt -> join -> clean -> weekly -> features ...")
         sub = sales_wide[sales_wide["store_id"] == store]
-        long = melt_long(sub)
-        long = join_calendar(long, cal)
+        long = etl.melt_long(sub)
+        long = etl.join_calendar(long, cal)
         p_store = prices[prices["store_id"] == store]
         p_store = p_store.assign(store_id=p_store["store_id"].astype(str),
                                  item_id=p_store["item_id"].astype(str))
-        long = join_prices(long, p_store)
-        daily = add_flags(long)
+        long = etl.join_prices(long, p_store)
+        daily = etl.add_flags(long)
         del long
         gc.collect()
 
-        weekly_all = aggregate_weekly(daily)
+        weekly_all = etl.aggregate_weekly(daily)
         d_total = int(daily["sales"].sum())
         w_total = int(weekly_all["sales"].sum())
         del daily
         gc.collect()
 
-        weekly = keep_full_active(weekly_all)
+        weekly = etl.keep_full_active(weekly_all)
         n_weeks_all = len(weekly_all)
         del weekly_all
-        weekly = add_features(weekly)
+        weekly = etl.add_features(weekly)
         weekly = downcast(weekly)
         weekly.to_parquet(out, index=False)
 
@@ -115,18 +109,15 @@ def main() -> None:
 
     if val_rows:
         val = pd.DataFrame(val_rows)
-        # append to existing validation if resuming
         vp = OUT_REP / "data_validation.csv"
         if vp.exists():
             val = pd.concat([pd.read_csv(vp), val], ignore_index=True).drop_duplicates("store")
         val.to_csv(vp, index=False)
 
-    # final audit over all parquets
     print("\n[audit] all stores:")
     tot_series, tot_rows = 0, 0
     for store in stores:
-        f = OUT_DATA / f"weekly_{store}.parquet"
-        w = pd.read_parquet(f, columns=["id", "sales"])
+        w = pd.read_parquet(OUT_DATA / f"weekly_{store}.parquet", columns=["id", "sales"])
         tot_series += w["id"].nunique(); tot_rows += len(w)
         del w
     print(f"      series total : {tot_series:,} (expect 30,490)")

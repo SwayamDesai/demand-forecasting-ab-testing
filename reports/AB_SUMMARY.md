@@ -1,4 +1,4 @@
-# Full M5 -- Cost-Aware A/B at 30K series
+# Cost-Aware A/B at 30K series
 
 Control = ma4 + z(0.833)*sigma. Treatment = per-store LightGBM quantile orders. Panel = 30,474 paired series.
 

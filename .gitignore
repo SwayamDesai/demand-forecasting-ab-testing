@@ -16,3 +16,7 @@ venv/
 # experiment tracking / scratch
 mlruns/
 *.log
+
+# model-prediction checkpoints (regenerable)
+reports/lgbm_mean/
+reports/lgbm_quantile/

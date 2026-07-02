@@ -1,4 +1,4 @@
-# Weekly demand forecasting -- task runner.  Usage: `make <target>`
+# Demand forecasting + cost-aware A/B -- task runner.  Usage: `make <target>`
 PYTHON := .venv/bin/python
 KAGGLE := .venv/bin/kaggle
 COMP   := m5-forecasting-accuracy
@@ -10,7 +10,7 @@ help:
 	@echo "targets:"
 	@echo "  install    create .venv and install requirements"
 	@echo "  data       download the 3 M5 raw files from Kaggle into data/raw"
-	@echo "  pipeline   run all phases end-to-end (1 -> 8c)"
+	@echo "  pipeline   run the three steps end-to-end (~20 min, <5GB RAM)"
 	@echo "  test       run the unit tests"
 
 install:
@@ -26,16 +26,9 @@ data:
 	cd $(RAW) && for z in *.zip; do [ -f "$$z" ] && unzip -o "$$z" && rm -f "$$z" || true; done
 
 pipeline:
-	$(PYTHON) -m scripts.phase1_data_cleaning
-	$(PYTHON) -m scripts.phase2_preprocessing
-	$(PYTHON) -m scripts.phase3_eda
-	$(PYTHON) -m scripts.phase4_ts_diagnostics
-	$(PYTHON) -m scripts.phase5_baselines
-	$(PYTHON) -m scripts.phase6_lightgbm
-	$(PYTHON) -m scripts.phase7_lstm
-	$(PYTHON) -m scripts.phase8_ab_test
-	$(PYTHON) -m scripts.phase8b_cost_aware
-	$(PYTHON) -m scripts.phase8c_retest
+	$(PYTHON) -m scripts.prepare_data
+	$(PYTHON) -m scripts.train_models
+	$(PYTHON) -m scripts.ab_test
 
 test:
 	$(PYTHON) -m pytest -q

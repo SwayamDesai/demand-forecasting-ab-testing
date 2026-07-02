@@ -1,27 +1,24 @@
 """
-Full-M5 scale, step 2 -- fast baselines + per-store LightGBM (30,490 series).
+Step 2 -- models: fast baselines + one LightGBM per store (30,490 series).
 
-Scale decisions (and why):
-  * NO statsforecast / ETS / ARIMA here: per-series fitting at 30K series is hours of
-    CPU and the multiprocessing memory bomb that kills 16GB machines. The fast
-    baselines below are pure vectorized pandas (seconds) and give the accuracy floor.
-  * NO LSTM: it lost to LightGBM at 900-series scale, adds no decision value, and is
-    the one component that could blow the memory/time budget.
-  * LightGBM is trained PER STORE (10 models per fold) -- the pattern the M5 winners
-    used: each store frame is ~670K rows, fits in a couple hundred MB, trains in
-    seconds-to-minutes, and store-level demand patterns get their own model.
-  * Checkpointed per store; a crash resumes where it left off.
+Model choices (and why):
+  * Baselines are pure vectorized pandas (seconds): naive_last, seasonal_naive_52,
+    ma4, ma8. Per-series classical fitting (ETS/ARIMA) is hours of CPU at 30K series
+    for no decision value -- the fast baselines set the accuracy floor.
+  * LightGBM is trained PER STORE (10 models per fold): each store frame is ~670K
+    rows, trains in seconds-to-minutes, and store-level demand gets its own model.
+  * Tweedie objective (zero-inflation + multiplicative variance), recursive 4-week
+    forecast. Checkpointed per store; a crash resumes.
 
-Baselines (vectorized): naive_last, seasonal_naive_52 (fallback naive), ma4, ma8.
-Evaluation: identical rolling-origin protocol as the 900-series pipeline
-(3 folds x 4-week horizon), pooled volume-weighted WMAPE + bias + MASE.
+Evaluation: rolling-origin, 3 folds x 4-week horizon, pooled volume-weighted WMAPE
++ bias + median MASE.
 
 Outputs:
-  reports/full_m5/baseline_predictions.parquet
-  reports/full_m5/lgbm_mean/preds_{STORE}.parquet   (checkpoints)
-  reports/full_m5/leaderboard_summary.csv, leaderboard_per_store.csv
-  reports/full_m5/01_leaderboard.png, 02_per_store_wmape.png
-  reports/full_m5/FULL2_SUMMARY.md
+  reports/baseline_predictions.parquet
+  reports/lgbm_mean/preds_{STORE}.parquet     (checkpoints, gitignored)
+  reports/leaderboard_summary.csv, leaderboard_per_store.csv
+  reports/01_leaderboard.png, 02_per_store_wmape.png
+  reports/MODELS_SUMMARY.md
 """
 from __future__ import annotations
 
@@ -36,28 +33,18 @@ import numpy as np
 import pandas as pd
 
 from src import backtest, config, metrics
-from scripts.phase6_lightgbm import (EXOG, STATIC, add_codes, fit_fold,
-                                     recursive_forecast)
+from src.etl import load_weekly
+from src.lgbm import EXOG, STATIC, add_codes, fit_mean, recursive_forecast
 
 pd.options.mode.copy_on_write = True
 warnings.simplefilter("ignore")
 
-DATA = config.PROCESSED / "full"
-OUT = config.REPORTS / "full_m5"
+OUT = config.REPORTS
 LGBM_DIR = OUT / "lgbm_mean"
 
 
 def rss_gb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9
-
-
-def load_weekly() -> pd.DataFrame:
-    parts = sorted(DATA.glob("weekly_*.parquet"))
-    assert len(parts) == 10, f"expected 10 store parquets, found {len(parts)}"
-    w = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
-    for c in ("id", "item_id", "dept_id", "cat_id", "store_id", "state_id"):
-        w[c] = w[c].astype("category")
-    return w
 
 
 # ---- vectorized baselines ----------------------------------------------------
@@ -135,7 +122,7 @@ def main() -> None:
         store_preds = []
         for f in folds:
             train = ws[ws["week_end_date"] <= f.train_end].dropna(subset=["sales"])
-            model = fit_fold(train)
+            model = fit_mean(train)
             work = ws[["id", "week_end_date", "sales"]].copy()
             work["sales_work"] = np.where(work["week_end_date"] <= f.train_end,
                                           work["sales"], np.nan)
@@ -183,14 +170,13 @@ def main() -> None:
     ps = pd.DataFrame(per_store)
     ps.to_csv(OUT / "leaderboard_per_store.csv", index=False)
 
-    # figures
     fig, ax = plt.subplots(figsize=(7, 4))
     colors = ["#55A868" if i == 0 else "#4C72B0" for i in range(len(lb))]
     ax.barh(lb["model"], lb["wmape"], color=colors)
     for i, (v, b) in enumerate(zip(lb["wmape"], lb["bias_pct"])):
         ax.text(v, i, f"  {v:.3f} (bias {b:+.0f}%)", va="center", fontsize=8)
     ax.invert_yaxis(); ax.set_xlabel("WMAPE")
-    ax.set_title(f"Full M5 ({tbl['id'].nunique():,} series) -- champion in green")
+    ax.set_title(f"M5 ({tbl['id'].nunique():,} series) -- champion in green")
     fig.tight_layout(); fig.savefig(OUT / "01_leaderboard.png", dpi=110); plt.close(fig)
 
     piv = ps.pivot(index="store", columns="model", values="wmape")
@@ -199,8 +185,8 @@ def main() -> None:
     fig.tight_layout(); fig.savefig(OUT / "02_per_store_wmape.png", dpi=110); plt.close(fig)
 
     champ = lb.iloc[0]["model"]
-    with open(OUT / "FULL2_SUMMARY.md", "w") as f:
-        f.write("# Full M5 -- Baselines + per-store LightGBM\n\n")
+    with open(OUT / "MODELS_SUMMARY.md", "w") as f:
+        f.write("# Baselines + per-store LightGBM\n\n")
         f.write(f"Panel: {tbl['id'].nunique():,} series, {len(tbl):,} test cells "
                 f"(3 folds x 4-week horizon).\n\n")
         f.write("| model | WMAPE | RMSE | bias % | MASE (med) |\n|---|---|---|---|---|\n")
@@ -208,10 +194,11 @@ def main() -> None:
             star = " **<- champion**" if r["model"] == champ else ""
             f.write(f"| {r['model']}{star} | {r['wmape']:.4f} | {r['rmse']:.3f} | "
                     f"{r['bias_pct']:+.1f}% | {r['mase_median']:.3f} |\n")
-        f.write(f"\nPer-store WMAPE in `leaderboard_per_store.csv`. ETS/ARIMA/LSTM "
-                f"deliberately excluded at this scale (see script docstring).\n")
+        f.write("\nPer-store WMAPE in `leaderboard_per_store.csv`. Per-series classical "
+                "models (ETS/ARIMA) and the LSTM are deliberately excluded at this scale "
+                "(see script docstring).\n")
 
-    print("\n=== Full M5 leaderboard ===")
+    print("\n=== leaderboard ===")
     print(lb.to_string(index=False))
     print(f"\nchampion: {champ} | peak RSS {rss_gb():.1f} GB")
 

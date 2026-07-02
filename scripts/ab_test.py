@@ -1,29 +1,28 @@
 """
-Full-M5 scale, step 3 -- cost-aware quantile LightGBM + the A/B test at 30K series.
+Step 3 -- the A/B test: cost-aware quantile ordering vs the simple current system.
 
-Arms (the realistic champion-challenger at scale):
+Arms:
   control   = ma4 forecast + Gaussian newsvendor policy z(0.833)*sigma
               (the simple rule-based ordering a retailer actually runs)
-  treatment = per-store LightGBM pinball loss predicting the demand quantile = the order
-              (lag features over the horizon fed by the step-2 Tweedie MEAN model)
+  treatment = per-store LightGBM pinball loss predicting the demand quantile = the
+              order (lag features over the horizon fed by the step-2 MEAN model)
 
-What changes in the A/B at this scale (pre-registered here, before results):
+The A/B design, pre-registered before results:
   1. PRIMARY TEST = paired MEAN cost difference (paired t + bootstrap CI) -- the
-     total-dollars question. This is the standard we adopted after Phase 8c; it is
-     not being chosen in response to any full-scale result.
-  2. PRACTICAL SIGNIFICANCE CARRIES THE DECISION. At n~30,000 paired series, p-values
+     total-dollars question.
+  2. PRACTICAL SIGNIFICANCE CARRIES THE DECISION: at ~30,000 paired series p-values
      collapse for trivially small effects; the >=5% cost-reduction gate is the real
      bar, p<0.05 is merely necessary.
-  3. PER-STORE HETEROGENEITY is reported (10 per-store models -> natural cut): a
-     verdict that only holds in some stores argues for a staged store-level rollout.
+  3. PER-STORE HETEROGENEITY is reported: a verdict that only holds in some stores
+     argues for a staged store-level rollout.
   4. POLICY-ISOLATION SECONDARY: LightGBM-mean + z*sigma vs LightGBM-quantile
      separates "better model" from "better ordering policy".
 
 Protocol: tau in {0.85, 0.866, 0.90} selected on folds 1-2, confirmed ONCE on fold 3.
 Gates: mean cost reduction >= 5%  AND  p < 0.05  AND  stockout increase <= +2pp.
-Sensitivity: repriced at 3:1 and 9:1.
+Sensitivity: the same orders repriced at 3:1 and 9:1.
 
-Checkpointed per store. Outputs in reports/full_m5/.
+Checkpointed per store. Outputs in reports/.
 """
 from __future__ import annotations
 
@@ -39,15 +38,14 @@ import pandas as pd
 from scipy import stats
 
 from src import backtest, config, experiment as ex, metrics
-from scripts.phase6_lightgbm import EXOG, FEATURES, STATIC, add_codes, sales_features_at
-from scripts.phase8b_cost_aware import fit_quantile, tau_name
-from scripts.full2_models import load_weekly
+from src.etl import load_weekly
+from src.lgbm import (EXOG, FEATURES, STATIC, add_codes, fit_quantile,
+                      sales_features_at, tau_name)
 
 pd.options.mode.copy_on_write = True
 warnings.simplefilter("ignore")
 
-DATA = config.PROCESSED / "full"
-OUT = config.REPORTS / "full_m5"
+OUT = config.REPORTS
 QDIR = OUT / "lgbm_quantile"
 
 CU, CO = 5.0, 1.0
@@ -79,8 +77,7 @@ def paired_mean_test(a, b, seed=0, nb=4000) -> dict:
 
 
 def fit_quantiles_all_stores(w, folds, lookups) -> pd.DataFrame:
-    """Per store x fold: 3 quantile fits + orders on test cells (mean-fed features)."""
-    qcols = [tau_name(t) for t in TAUS]
+    """Per store x fold: quantile fits + orders on test cells (mean-fed features)."""
     stores = sorted(w["store_id"].astype(str).unique())
     for store in stores:
         ck = QDIR / f"preds_{store}.parquet"
@@ -130,7 +127,7 @@ def main() -> None:
     print("[1/5] load panel + step-2 predictions...")
     w = load_weekly()
     folds = backtest.make_folds(w["week_end_date"], config.HORIZON_WEEKS, config.N_FOLDS)
-    base = pd.read_parquet(OUT / "baseline_predictions.parquet")   # y, ma4, fold, store_id
+    base = pd.read_parquet(OUT / "baseline_predictions.parquet")
     mean_lgbm = pd.concat([pd.read_parquet(p) for p in
                            sorted((OUT / "lgbm_mean").glob("preds_*.parquet"))],
                           ignore_index=True).rename(columns={"y_pred": "lgbm_mean"})
@@ -145,7 +142,6 @@ def main() -> None:
     tbl = (base.merge(quant, on=["id", "week_end_date", "fold"], how="inner")
                .merge(mean_lgbm[["id", "week_end_date", "lgbm_mean"]],
                       on=["id", "week_end_date"], how="left"))
-    # history filter: need >=8 weeks before the first test week for sigma/ma stability
     first_test = folds[0].test_start
     hist_weeks = (w[w["week_end_date"] < first_test]
                   .groupby("id", observed=True)["week_end_date"].size())
@@ -197,11 +193,9 @@ def main() -> None:
     guard_ok = stockout_pp <= MAX_STOCKOUT_INCREASE_PP
     decision = "SHIP" if (cost_ok and sig_ok and guard_ok) else "HOLD"
 
-    # policy isolation: same model family, policy is the only change
     iso = paired_mean_test(ex.per_series(csim["lgbm_mean_policy"])["cost"],
                            chall_ps["cost"])
 
-    # sensitivity
     sens_rows = [dict(ratio="5:1", cost_pct_change=primary["pct_change"],
                       p=primary["p_value"], stockout_pp=stockout_pp, decision=decision)]
     for cu, co in SENSITIVITY_RATIOS:
@@ -217,7 +211,6 @@ def main() -> None:
         del s; gc.collect()
     sens = pd.DataFrame(sens_rows)
 
-    # per-store heterogeneity (paired, fold 3)
     store_map = conf[["id", "store_id"]].drop_duplicates().set_index("id")["store_id"]
     per_store = []
     merged = (champ_ps.set_index("id")["cost"].rename("c")
@@ -235,7 +228,6 @@ def main() -> None:
     wmape_c = metrics.wmape(conf["y"], conf["ma4"])
     wmape_t = metrics.wmape(conf["y"], conf[chosen])
 
-    # figures
     fig, ax = plt.subplots(figsize=(7, 3.4))
     ax.plot([primary["ci_low_pct"], primary["ci_high_pct"]], [1, 1], color="#C44E52", lw=3,
             label="95% CI")
@@ -243,7 +235,7 @@ def main() -> None:
     ax.axvline(0, ls="--", c="grey"); ax.axvline(-5, ls=":", c="green", label="ship threshold -5%")
     ax.set_ylim(0.5, 1.5); ax.set_yticks([])
     ax.set_xlabel("mean cost change % (cost-aware vs ma4+safety-stock)")
-    ax.set_title(f"Full M5 confirmation, n={primary['n']:,}, tau={chosen} -> {decision}")
+    ax.set_title(f"Confirmation, n={primary['n']:,}, tau={chosen} -> {decision}")
     ax.legend(fontsize=8)
     fig.tight_layout(); fig.savefig(OUT / "03_ab_confirmation_ci.png", dpi=110); plt.close(fig)
 
@@ -255,8 +247,8 @@ def main() -> None:
     ax.set_ylabel("cost change % (fold 3)"); ax.set_title("Per-store cost impact")
     fig.tight_layout(); fig.savefig(OUT / "04_ab_per_store.png", dpi=110); plt.close(fig)
 
-    with open(OUT / "FULL3_AB_SUMMARY.md", "w") as f:
-        f.write("# Full M5 -- Cost-Aware A/B at 30K series\n\n")
+    with open(OUT / "AB_SUMMARY.md", "w") as f:
+        f.write("# Cost-Aware A/B at 30K series\n\n")
         f.write(f"Control = ma4 + z(0.833)*sigma. Treatment = per-store LightGBM "
                 f"quantile orders. Panel = {primary['n']:,} paired series.\n\n")
         f.write("## Pre-registered rule\n\nSHIP iff mean cost reduction >= 5% AND paired-t "
@@ -289,7 +281,7 @@ def main() -> None:
         for _, r in ps.iterrows():
             f.write(f"| {r['store']} | {int(r['n'])} | {r['cost_pct']:+.1f}% |\n")
 
-    print(f"\n=== Full M5 A/B verdict (fold 3, n={primary['n']:,}) ===")
+    print(f"\n=== A/B verdict (fold 3, n={primary['n']:,}) ===")
     print(f"chosen tau={chosen} | DECISION: {decision}")
     print(f"mean cost {primary['pct_change']:+.1f}% (p={primary['p_value']:.2e}, "
           f"CI [{primary['ci_low_pct']:.1f}%, {primary['ci_high_pct']:.1f}%]) | "

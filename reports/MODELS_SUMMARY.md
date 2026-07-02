@@ -1,4 +1,4 @@
-# Full M5 -- Baselines + per-store LightGBM
+# Baselines + per-store LightGBM
 
 Panel: 30,490 series, 365,880 test cells (3 folds x 4-week horizon).
 
@@ -10,4 +10,4 @@ Panel: 30,490 series, 365,880 test cells (3 folds x 4-week horizon).
 | naive_last | 0.4283 | 9.627 | -5.3% | 0.733 |
 | snaive_52 | 0.6218 | 14.890 | -12.9% | 0.916 |
 
-Per-store WMAPE in `leaderboard_per_store.csv`. ETS/ARIMA/LSTM deliberately excluded at this scale (see script docstring).
+Per-store WMAPE in `leaderboard_per_store.csv`. Per-series classical models (ETS/ARIMA) and the LSTM are deliberately excluded at this scale (see script docstring).
