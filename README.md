@@ -81,6 +81,37 @@ leaderboard.*
 
 ---
 
+## Full-M5 scale-up: all 30,490 series on a 16GB laptop
+
+The entire pipeline was then scaled 34× to the **full M5 dataset** (30,490 store-SKU series,
+10 stores) using the discipline the M5 winners used: **per-store chunked ETL** (never
+materialize the 59M-row daily frame), int16/float32/category dtypes, **one LightGBM per
+store**, and per-store checkpoints so every step is resumable. Total runtime **~20 minutes,
+peak RAM 4.5GB**. ETS/ARIMA/LSTM are deliberately excluded at this scale (hours of per-series
+CPU for no decision value — the fast baselines set the floor).
+
+**Accuracy (30,490 series):** per-store LightGBM WMAPE **0.3706** vs 0.3875 for the best
+simple baseline (ma4) — a 4.4% edge that *grew* with scale (0.7% at 900 series).
+
+**The A/B at n=30,474 paired series — SHIP, decisively:**
+
+| gate | result |
+|---|---|
+| mean cost reduction ≥ 5% | **−14.1%** (CI [−15.3%, −12.9%], p≈10⁻¹¹⁰) |
+| stockout guardrail ≤ +2pp | +1.57pp |
+| τ (selected folds 1–2, confirmed fold 3) | **0.866 — same as the 900-series retest** |
+
+- **All 10 stores save money** (−5.9% to −23.0%) → supports a staged store-level rollout.
+- **Policy isolation:** vs LightGBM-mean + safety stock, quantile ordering still saves −9.4%
+  — the ordering policy, not just the model, drives the gain.
+- Scale-appropriate testing: the mean-based paired test is pre-registered, and at this n the
+  **≥5% practical-significance gate carries the decision** (p-values collapse for trivial
+  effects at 30K pairs). SHIP also holds at 3:1 economics; 9:1 would need τ retuned.
+
+![per-store impact](reports/full_m5/04_ab_per_store.png)
+
+---
+
 ## The phases (each gated by its own quality checks)
 
 | # | phase | what it produces | headline |
@@ -95,6 +126,9 @@ leaderboard.*
 | 8 | A/B test | newsvendor sim + paired/unpaired + guardrails | **HOLD** (honest no-go) |
 | 8b | Cost-aware retrain | quantile-loss LightGBM orders the τ\*-quantile directly | −5.6% cost, better service — **HOLD** on the pre-registered test, retest specified |
 | 8c | Pre-registered retest | fresh 24 weeks, dollars-based paired test, τ=0.866 | **SHIP**: −6.9% cost (p=5×10⁻⁴), stockouts +0.65pp |
+| F1 | Full-M5 ETL | per-store chunked raw→weekly (30,490 series) | 68s, 3.7GB peak, all stores reconcile |
+| F2 | Full-M5 models | vectorized baselines + 10 per-store LightGBMs | champion WMAPE **0.3706** (~5 min) |
+| F3 | Full-M5 A/B | quantile ordering vs ma4+safety-stock, n=30,474 | **SHIP**: −14.1% cost, all 10 stores negative |
 
 ---
 
@@ -173,10 +207,16 @@ python -m scripts.phase8_ab_test
 python -m scripts.phase8b_cost_aware    # cost-aware quantile follow-up
 python -m scripts.phase8c_retest        # pre-registered retest -> SHIP
 
+# full-M5 scale-up (all 30,490 series; ~20 min total, <5GB RAM, checkpointed)
+python -m scripts.full1_data            # chunked per-store ETL (68s)
+python -m scripts.full2_models          # baselines + 10 per-store LightGBMs (~5 min)
+python -m scripts.full3_ab              # quantile models + A/B at scale (~14 min)
+
 pytest -q                               # 18 tests (also run in CI)
 ```
 
-(or `make pipeline` for all ten phases end-to-end)
+(or `make pipeline` for all ten sample-scale phases end-to-end)
 
 *Tech: Python, pandas/numpy, statsforecast, LightGBM, PyTorch, scipy/statsmodels, matplotlib.*
-*Sample: 900 store-SKU series (3 stores × 3 categories × 100 items), 2011–2016.*
+*Data: Walmart M5, 2011–2016 — development at 900 series (3 stores × 3 cats × 100 items),
+then scaled to the full 30,490 series across all 10 stores.*
